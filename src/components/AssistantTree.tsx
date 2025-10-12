@@ -14,11 +14,11 @@ const formatDate = (value?: string | null) => {
 };
 
 const formatTopicMeta = (messageCount: number, date?: string) => {
-  const parts = [`${messageCount} 条消息`];
+  const segments = [`${messageCount} 条消息`];
   if (date) {
-    parts.push(date);
+    segments.push(date);
   }
-  return parts.join(' · ');
+  return segments.join(' · ');
 };
 
 export const AssistantTree = () => {
@@ -42,23 +42,27 @@ export const AssistantTree = () => {
 
       <div className="space-y-5">
         {sortedGroups.map((group) => {
-          const topics = group.sessions.flatMap((session) =>
-            session.topics.map((topic) => {
-              const firstMessage = topic.messages[0];
-              const topicDate =
-                topic.topic?.createdAt ??
-                firstMessage?.createdAt ??
-                firstMessage?.updatedAt ??
-                topic.topic?.updatedAt ??
-                '';
-              return {
-                id: topic.topicId,
-                label: topic.topicLabel,
-                messageCount: topic.messages.length,
-                date: formatDate(topicDate),
-              };
-            }),
-          );
+          const topics = group.sessions
+            .flatMap((session) =>
+              session.topics.map((topic) => {
+                const lastMessage = topic.messages[topic.messages.length - 1];
+                const isoTimestamp =
+                  topic.topic?.updatedAt ??
+                  lastMessage?.updatedAt ??
+                  lastMessage?.createdAt ??
+                  topic.topic?.createdAt ??
+                  '';
+                const timestamp = isoTimestamp ? new Date(isoTimestamp).getTime() : 0;
+                return {
+                  id: topic.topicId,
+                  label: topic.topicLabel,
+                  messageCount: topic.messages.length,
+                  timestamp,
+                  dateDisplay: isoTimestamp ? formatDate(isoTimestamp) : '',
+                };
+              }),
+            )
+            .sort((a, b) => b.timestamp - a.timestamp);
 
           const topicCount = topics.length;
 
@@ -74,7 +78,7 @@ export const AssistantTree = () => {
                   <li key={topic.id} className="flex items-center justify-between gap-4 py-2">
                     <span className="truncate pr-4">{topic.label}</span>
                     <span className="whitespace-nowrap text-xs text-slate-400">
-                      {formatTopicMeta(topic.messageCount, topic.date)}
+                      {formatTopicMeta(topic.messageCount, topic.dateDisplay)}
                     </span>
                   </li>
                 ))}
