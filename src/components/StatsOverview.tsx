@@ -16,9 +16,8 @@ export const StatsOverview = () => {
   if (!stats) return null;
 
   return (
-    <section className="grid gap-4 rounded-3xl border border-slate-700/60 bg-slate-900/60 p-6 sm:grid-cols-2 lg:grid-cols-4">
+    <section className="grid gap-4 rounded-3xl border border-slate-700/60 bg-slate-900/60 p-6 sm:grid-cols-2 lg:grid-cols-3">
       <StatCard label="助手数量" value={stats.agentCount} />
-      <StatCard label="会话数量" value={stats.sessionCount} />
       <StatCard label="话题数量" value={stats.topicCount} />
       <StatCard label="消息数量" value={stats.messageCount} />
     </section>
