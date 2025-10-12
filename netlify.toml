@@ -1,0 +1,5 @@
+[[redirects]]
+from = "/notion/*"
+to = "/.netlify/functions/notion-proxy/:splat"
+status = 200
+force = true
