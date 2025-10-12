@@ -481,24 +481,23 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
   for (const group of parsed.groups) {
     const agentDirBase = safeFilename(group.agentLabel, group.agentId);
     const agentDirName = ensureUniqueName(agentDirBase, usedAgentDirNames);
-    const usedSessionNames = new Set<string>();
     const agent = group.agent;
+    const usedTopicNames = new Set<string>();
 
     for (const sessionGroup of group.sessions) {
-      const sessionDirBase = safeFilename(sessionGroup.sessionLabel, sessionGroup.sessionId);
-      const sessionDirName = ensureUniqueName(sessionDirBase, usedSessionNames);
-      const usedTopicNames = new Set<string>();
-
       for (const topicGroup of sessionGroup.topics) {
-        const topicFileBase = safeFilename(topicGroup.topicLabel, topicGroup.topicId);
+        let topicFileBase = safeFilename(topicGroup.topicLabel, topicGroup.topicId);
+        if (usedTopicNames.has(topicFileBase)) {
+          topicFileBase = safeFilename(`${sessionGroup.sessionLabel}_${topicGroup.topicLabel}`, topicGroup.topicId);
+        }
         const topicFileName = ensureUniqueName(topicFileBase, usedTopicNames);
-        const path = `${agentDirName}/${sessionDirName}/${topicFileName}.md`;
+        const path = `${agentDirName}/${topicFileName}.md`;
         files.push({
           path,
           content: buildMarkdownForTopic(agent, sessionGroup.session, topicGroup, group.agentLabel),
         });
         indexLines.push(
-          `- [${group.agentLabel} / ${sessionGroup.sessionLabel} / ${topicGroup.topicLabel}](${path}) - ${topicGroup.messages.length} messages`,
+          `- [${group.agentLabel} / ${topicGroup.topicLabel}](${path}) - ${topicGroup.messages.length} messages (session: ${sessionGroup.sessionLabel})`,
         );
       }
     }
