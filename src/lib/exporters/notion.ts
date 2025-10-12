@@ -245,8 +245,10 @@ export const exportToNotion = async ({ parsed, config, log }: NotionExportOption
     throw new Error('没有可导出的会话数据');
   }
 
-  const baseUrl = (config.proxyUrl && config.proxyUrl.trim()) || 'https://api.notion.com';
-  const client = createNotionRequester(config.token, baseUrl);
+  const proxyUrl = config.proxyUrl?.trim();
+  const baseUrl = proxyUrl ? proxyUrl.replace(/\/+$/, '') : 'https://api.notion.com';
+  const pathPrefix = proxyUrl ? '' : '/v1';
+  const client = createNotionRequester(config.token, `${baseUrl}${pathPrefix}`);
 
   const useDatabase = Boolean(config.assistantDatabaseId && config.conversationDatabaseId);
 
