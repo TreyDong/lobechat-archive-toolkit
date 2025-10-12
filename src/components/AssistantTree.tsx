@@ -1,21 +1,23 @@
-import { useMemo, useState } from 'react';
-import { Transition } from '@headlessui/react';
+import { useMemo } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 
-const ExpandIcon = ({ expanded }: { expanded: boolean }) => (
-  <span
-    className={`inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-600/70 text-xs transition ${
-      expanded ? 'bg-indigo-500/30 text-indigo-200 border-indigo-500/50' : 'text-slate-300'
-    }`}
-  >
-    {expanded ? '−' : '+'}
-  </span>
-);
+const formatDate = (value?: string | null) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+const formatTopicMeta = (messageCount: number, date?: string) => {
+  const parts = [`${messageCount} 条消息`];
+  if (date) {
+    parts.push(date);
+  }
+  return parts.join(' · ');
+};
 
 export const AssistantTree = () => {
   const groups = useAppStore((state) => state.parsed?.groups);
-  const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
-  const [expandedSessions, setExpandedSessions] = useState<Record<string, boolean>>({});
 
   const sortedGroups = useMemo(() => {
     if (!groups) return [];
@@ -28,99 +30,57 @@ export const AssistantTree = () => {
 
   return (
     <section className="rounded-3xl border border-slate-700/60 bg-slate-900/70 p-6">
-      <header className="mb-4 flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-slate-100">会话结构预览</h2>
-          <p className="text-sm text-slate-400">按助手 → 会话 → 话题 展示解析结果</p>
-        </div>
-        <button
-          type="button"
-          className="rounded-full border border-slate-700/60 px-4 py-1.5 text-sm text-slate-300 hover:border-slate-500/70 hover:text-white"
-          onClick={() => {
-            setExpandedAgents({});
-            setExpandedSessions({});
-          }}
-        >
-          全部折叠
-        </button>
+      <header className="mb-4">
+        <h2 className="text-lg font-semibold text-slate-100">会话结构预览</h2>
+        <p className="text-sm text-slate-400">按助手展开全部话题，便于快速定位内容。</p>
       </header>
 
-      <div className="space-y-3">
-        {sortedGroups.map((group) => {
-          const isExpanded = expandedAgents[group.agentId] ?? true;
-          return (
-            <div key={group.agentId} className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-4">
-              <button
-                type="button"
-                className="flex w-full items-center justify-between gap-3 text-left"
-                onClick={() =>
-                  setExpandedAgents((prev) => ({ ...prev, [group.agentId]: !(prev[group.agentId] ?? true) }))
-                }
-              >
-                <div>
-                  <h3 className="text-base font-semibold text-indigo-100">{group.agentLabel}</h3>
-                  <p className="text-xs text-slate-400">
-                    {group.sessions.length} 个会话 ·{' '}
-                    {group.sessions.reduce((acc, session) => acc + session.topics.length, 0)} 个话题
-                  </p>
-                </div>
-                <ExpandIcon expanded={isExpanded} />
-              </button>
-
-              <Transition
-                show={isExpanded}
-                enter="transition-all duration-200"
-                enterFrom="max-h-0 opacity-0"
-                enterTo="max-h-screen opacity-100"
-                leave="transition-all duration-150"
-                leaveFrom="max-h-screen opacity-100"
-                leaveTo="max-h-0 opacity-0"
-              >
-                <div className="mt-3 space-y-2">
-                  {group.sessions.map((session) => {
-                    const sessionKey = `${group.agentId}:${session.sessionId}`;
-                    const sessionExpanded = expandedSessions[sessionKey] ?? true;
-                    return (
-                      <div key={session.sessionId} className="rounded-xl border border-slate-700/50 bg-slate-900/70 p-3">
-                        <button
-                          type="button"
-                          className="flex w-full items-center justify-between gap-3 text-left"
-                          onClick={() =>
-                            setExpandedSessions((prev) => ({
-                              ...prev,
-                              [sessionKey]: !(prev[sessionKey] ?? true),
-                            }))
-                          }
-                        >
-                          <div>
-                            <p className="font-medium text-slate-100">{session.sessionLabel}</p>
-                            <p className="text-xs text-slate-500">
-                              {session.topics.length} 个话题
-                              {session.session?.createdAt ? ` · ${new Date(session.session.createdAt).toLocaleString()}` : ''}
-                            </p>
-                          </div>
-                          <ExpandIcon expanded={sessionExpanded} />
-                        </button>
-                        {sessionExpanded && (
-                          <ul className="mt-2 space-y-1 pl-4 text-sm text-slate-300">
-                            {session.topics.map((topic) => (
-                              <li key={topic.topicId} className="flex justify-between gap-4">
-                                <span>{topic.topicLabel}</span>
-                                <span className="text-xs text-slate-500">
-                                  {topic.messages.length} 条消息
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </Transition>
+      <div className="space-y-5">
+        {sortedGroups.map((group) => (
+          <div key={group.agentId} className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-4">
+            <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-indigo-100">{group.agentLabel}</h3>
+                <p className="text-xs text-slate-400">
+                  {group.sessions.length} 个会话 ·{' '}
+                  {group.sessions.reduce((acc, session) => acc + session.topics.length, 0)} 个话题
+                </p>
+              </div>
             </div>
-          );
-        })}
+
+            <div className="mt-4 space-y-3">
+              {group.sessions.map((session) => (
+                <div key={session.sessionId} className="rounded-xl border border-slate-700/50 bg-slate-900/70 p-3">
+                  <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+                    <div className="text-sm font-medium text-slate-200">{session.sessionLabel}</div>
+                    <div className="text-xs text-slate-500">
+                      {session.session?.createdAt ? formatDate(session.session.createdAt) : ''}
+                    </div>
+                  </div>
+                  <ul className="mt-3 divide-y divide-slate-800/60 text-sm text-slate-200">
+                    {session.topics.map((topic) => {
+                      const firstMessage = topic.messages[0];
+                      const topicDate =
+                        topic.topic?.createdAt ??
+                        firstMessage?.createdAt ??
+                        firstMessage?.updatedAt ??
+                        topic.topic?.updatedAt ??
+                        '';
+                      return (
+                        <li key={topic.topicId} className="flex items-center justify-between gap-4 py-2">
+                          <span className="truncate pr-4">{topic.topicLabel}</span>
+                          <span className="text-xs text-slate-400 whitespace-nowrap">
+                            {formatTopicMeta(topic.messages.length, formatDate(topicDate))}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );

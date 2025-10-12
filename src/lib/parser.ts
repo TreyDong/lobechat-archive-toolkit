@@ -99,14 +99,6 @@ interface RawLobeChatBackup {
 
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*]+/g;
 
-const looksReplacementHeavy = (text: string | null | undefined, threshold = 0.3): boolean => {
-  if (!text) return false;
-  const total = text.length;
-  if (total === 0) return false;
-  const replacements = [...text].filter((char) => char === '\ufffd').length;
-  return replacements / total >= threshold;
-};
-
 const safeFilename = (input: string | null | undefined, fallback: string, maxLength = 80): string => {
   let text = (input ?? fallback ?? 'untitled').trim();
   if (text.length === 0) text = fallback || 'untitled';
@@ -150,7 +142,7 @@ const deriveAgentLabel = (agent: LobeAgent | undefined, session: LobeSession | u
     session?.slug,
   ];
   const fallback = agent?.id ?? session?.id ?? 'assistant';
-  return candidates.find((text) => text && text.trim() && !looksReplacementHeavy(text))?.trim() ?? fallback;
+  return candidates.find((text) => text && text.trim())?.trim() ?? fallback;
 };
 
 const deriveSessionLabel = (
@@ -166,7 +158,7 @@ const deriveSessionLabel = (
   for (const topicId of topicOrder) {
     const topicGroup = topics[topicId];
     if (!topicGroup) continue;
-    if (!topicTitle && topicGroup.topic?.title && !looksReplacementHeavy(topicGroup.topic.title)) {
+    if (!topicTitle && topicGroup.topic?.title) {
       topicTitle = topicGroup.topic.title;
     }
     if (!snippet) {
@@ -187,7 +179,7 @@ const deriveSessionLabel = (
 
   const chosen = candidates.find((value) => value && value.trim()) ?? 'session';
   if (datePrefix && !chosen.startsWith(datePrefix)) {
-    return `${datePrefix}_${chosen}`;
+    return `${datePrefix} ${chosen}`;
   }
   return chosen;
 };
@@ -278,9 +270,7 @@ const buildTopicGroups = (
       return (aKey ?? '').localeCompare(bKey ?? '');
     });
     const topic = topics[topicId];
-    const topicLabel = topic?.title && !looksReplacementHeavy(topic.title)
-      ? topic.title
-      : `Topic_${topicId.slice(-6)}`;
+    const topicLabel = topic?.title ?? `Topic_${topicId.slice(-6)}`;
     result[topicId] = {
       topicId,
       topic,
