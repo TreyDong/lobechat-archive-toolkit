@@ -424,7 +424,7 @@ export const parseLobeChatJson = (
   };
 };
 
-const buildMarkdownForTopic = (
+export const buildMarkdownForTopic = (
   agent: LobeAgent | undefined,
   session: LobeSession | undefined,
   topicGroup: TopicGroup,
