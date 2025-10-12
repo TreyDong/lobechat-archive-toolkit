@@ -6,6 +6,7 @@ export interface NotionExportConfig {
   token: string;
   assistantDatabaseId?: string;
   conversationDatabaseId?: string;
+  proxyUrl?: string;
 }
 
 export interface NotionExportOptions {
@@ -14,9 +15,13 @@ export interface NotionExportOptions {
   log?: (message: string, level?: LogLevel) => void;
 }
 
+type NotionRequestInit = Omit<RequestInit, 'body'> & { body?: any };
+type NotionRequester = <T = any>(path: string, init?: NotionRequestInit) => Promise<T>;
+
 const NOTION_VERSION = '2022-06-28';
 
 const chunkText = (input: string, maxLength = 1800): string[] => {
+  if (!input) return [''];
   const chunks: string[] = [];
   for (let index = 0; index < input.length; index += maxLength) {
     chunks.push(input.slice(index, index + maxLength));
@@ -39,34 +44,35 @@ const markdownToBlocks = (markdown: string) =>
     },
   }));
 
-type NotionRequestInit = Omit<RequestInit, 'body'> & { body?: any };
+const createNotionRequester = (token: string, baseUrl: string): NotionRequester => {
+  const normalizedBase = baseUrl.replace(/\/+$/, '');
+  return async <T>(
+    path: string,
+    init?: NotionRequestInit,
+  ): Promise<T> => {
+    const response = await fetch(`${normalizedBase}${path}`, {
+      method: init?.method ?? 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Notion-Version': NOTION_VERSION,
+        ...init?.headers,
+      },
+      body: init?.body ? JSON.stringify(init.body) : undefined,
+      mode: 'cors',
+    });
 
-const notionFetch = async <T = any>(
-  token: string,
-  path: string,
-  init?: NotionRequestInit,
-): Promise<T> => {
-  const response = await fetch(`https://api.notion.com/v1${path}`, {
-    method: init?.method ?? 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'Notion-Version': NOTION_VERSION,
-      ...init?.headers,
-    },
-    body: init?.body ? JSON.stringify(init.body) : init?.body,
-  });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Notion API error ${response.status}: ${text}`);
+    }
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Notion API error ${response.status}: ${text}`);
-  }
+    if (response.status === 204) {
+      return undefined as T;
+    }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return (await response.json()) as T;
+    return (await response.json()) as T;
+  };
 };
 
 const findTitleProperty = (database: any) => {
@@ -97,14 +103,18 @@ const findSessionRichTextProperty = (conversationDb: any) => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const exportAsPages = async (groups: AgentGroup[], token: string, log?: NotionExportOptions['log']) => {
+const exportAsPages = async (
+  client: NotionRequester,
+  groups: AgentGroup[],
+  log?: NotionExportOptions['log'],
+) => {
   const emit = (message: string, level: LogLevel = 'info') => {
     if (log) log(message, level);
   };
 
   for (const group of groups) {
     emit(`Creating assistant page: ${group.agentLabel}`);
-    const assistantPage = await notionFetch<{ id: string }>(token, '/pages', {
+    const assistantPage = await client<{ id: string }>('/pages', {
       body: {
         parent: { type: 'workspace', workspace: true },
         properties: {
@@ -124,7 +134,7 @@ const exportAsPages = async (groups: AgentGroup[], token: string, log?: NotionEx
       for (const topic of session.topics) {
         const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel);
         emit(`  -> Creating topic page: ${topic.topicLabel}`);
-        await notionFetch(token, '/pages', {
+        await client('/pages', {
           body: {
             parent: { page_id: assistantPage.id },
             properties: {
@@ -137,7 +147,7 @@ const exportAsPages = async (groups: AgentGroup[], token: string, log?: NotionEx
                 ],
               },
             },
-            children: markdownToBlocks(markdown)
+            children: markdownToBlocks(markdown),
           },
         });
         await sleep(200);
@@ -147,8 +157,8 @@ const exportAsPages = async (groups: AgentGroup[], token: string, log?: NotionEx
 };
 
 const exportToDatabases = async (
+  client: NotionRequester,
   groups: AgentGroup[],
-  token: string,
   assistantDatabaseId: string,
   conversationDatabaseId: string,
   log?: NotionExportOptions['log'],
@@ -158,8 +168,8 @@ const exportToDatabases = async (
   };
 
   emit('Reading Notion database schema');
-  const assistantDb = await notionFetch<any>(token, `/databases/${assistantDatabaseId}`, { method: 'GET' });
-  const conversationDb = await notionFetch<any>(token, `/databases/${conversationDatabaseId}`, { method: 'GET' });
+  const assistantDb = await client<any>(`/databases/${assistantDatabaseId}`, { method: 'GET' });
+  const conversationDb = await client<any>(`/databases/${conversationDatabaseId}`, { method: 'GET' });
 
   const assistantTitleProp = findTitleProperty(assistantDb);
   const conversationTitleProp = findTitleProperty(conversationDb);
@@ -168,7 +178,7 @@ const exportToDatabases = async (
 
   for (const group of groups) {
     emit(`Writing assistant record: ${group.agentLabel}`);
-    const assistantEntry = await notionFetch<{ id: string }>(token, '/pages', {
+    const assistantEntry = await client<{ id: string }>('/pages', {
       body: {
         parent: { database_id: assistantDb.id },
         properties: {
@@ -213,11 +223,11 @@ const exportToDatabases = async (
           };
         }
 
-        await notionFetch(token, '/pages', {
+        await client('/pages', {
           body: {
             parent: { database_id: conversationDb.id },
             properties,
-            children: markdownToBlocks(markdown)
+            children: markdownToBlocks(markdown),
           },
         });
         await sleep(200);
@@ -235,17 +245,20 @@ export const exportToNotion = async ({ parsed, config, log }: NotionExportOption
     throw new Error('没有可导出的会话数据');
   }
 
+  const baseUrl = (config.proxyUrl && config.proxyUrl.trim()) || 'https://api.notion.com';
+  const client = createNotionRequester(config.token, baseUrl);
+
   const useDatabase = Boolean(config.assistantDatabaseId && config.conversationDatabaseId);
 
   if (useDatabase) {
     await exportToDatabases(
+      client,
       parsed.groups,
-      config.token,
       config.assistantDatabaseId!,
       config.conversationDatabaseId!,
       log,
     );
   } else {
-    await exportAsPages(parsed.groups, config.token, log);
+    await exportAsPages(client, parsed.groups, log);
   }
 };

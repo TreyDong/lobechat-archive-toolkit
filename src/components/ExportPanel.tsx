@@ -13,6 +13,7 @@ export const ExportPanel = () => {
   const [notionToken, setNotionToken] = useState('');
   const [assistantDatabaseId, setAssistantDatabaseId] = useState('');
   const [conversationDatabaseId, setConversationDatabaseId] = useState('');
+  const [notionProxyUrl, setNotionProxyUrl] = useState('');
 
   const handleMarkdownExport = async () => {
     if (!parsed) return;
@@ -45,12 +46,21 @@ export const ExportPanel = () => {
           token: notionToken.trim(),
           assistantDatabaseId: assistantDatabaseId.trim() || undefined,
           conversationDatabaseId: conversationDatabaseId.trim() || undefined,
+          proxyUrl: notionProxyUrl.trim() || undefined,
         },
         log: appendLog,
       });
       appendLog('Notion 导出完成', 'success');
     } catch (error) {
-      appendLog(`Notion 导出失败：${(error as Error).message}`, 'error');
+      const message = (error as Error).message || 'Unknown error';
+      if (message.includes('Failed to fetch')) {
+        appendLog(
+          'Notion 导出失败：浏览器无法直接访问 Notion API，请在设置中填写代理地址或改用服务端中转。',
+          'error',
+        );
+      } else {
+        appendLog(`Notion 导出失败：${message}`, 'error');
+      }
     } finally {
       setExporting(false);
     }
@@ -103,6 +113,12 @@ export const ExportPanel = () => {
             className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 placeholder-slate-500 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
           />
         </div>
+        <input
+          value={notionProxyUrl}
+          onChange={(event) => setNotionProxyUrl(event.target.value)}
+          placeholder="Notion API 代理地址（可选，如 https://your-domain.com/.netlify/functions/notion）"
+          className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 placeholder-slate-500 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        />
         <div className="flex gap-3">
           <button
             type="button"
@@ -118,6 +134,7 @@ export const ExportPanel = () => {
               setNotionToken('');
               setAssistantDatabaseId('');
               setConversationDatabaseId('');
+              setNotionProxyUrl('');
             }}
             className="rounded-full border border-transparent px-4 py-2 text-sm text-slate-400 hover:text-slate-200"
           >
@@ -130,6 +147,7 @@ export const ExportPanel = () => {
             <li>助手数据库需包含一个 title 属性（任意名称）。</li>
             <li>对话数据库需包含一个 title 属性，以及指向助手数据库的 relation 属性。</li>
             <li>若存在名为 “Session” 的 rich_text 属性，将自动写入会话标题。</li>
+            <li>由于 Notion API 不支持浏览器直接跨域访问，部署时需配置代理地址或服务端中转。</li>
           </ul>
         </div>
       </div>
