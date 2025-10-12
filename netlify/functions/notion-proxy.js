@@ -4,7 +4,8 @@ exports.handler = async (event) => {
   try {
     const notionPath = event.path.replace('/.netlify/functions/notion-proxy', '') || '/';
     const query = event.rawQuery ? `?${event.rawQuery}` : '';
-    const targetUrl = `${NOTION_BASE}${notionPath}${query}`;
+    const normalizedPath = notionPath.startsWith('/v1') ? notionPath : `/v1${notionPath}`;
+    const targetUrl = `${NOTION_BASE}${normalizedPath}${query}`;
 
     const headers = {
       'Notion-Version': '2022-06-28',
