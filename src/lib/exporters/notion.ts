@@ -40,6 +40,72 @@ const chunkArray = <T>(items: T[], size: number): T[][] => {
   return chunks;
 };
 
+const TEXT_BLOCK_TYPES = new Set([
+  'paragraph',
+  'heading_1',
+  'heading_2',
+  'heading_3',
+  'bulleted_list_item',
+  'numbered_list_item',
+  'to_do',
+  'quote',
+  'callout',
+  'toggle',
+]);
+
+const isRichTextItemValid = (item: any) => {
+  if (!item || typeof item !== 'object') return false;
+  if (item.type === 'text') {
+    const content = item.text?.content;
+    return typeof content === 'string';
+  }
+  return true;
+};
+
+const createEmptyRichText = () => [
+  {
+    type: 'text',
+    text: { content: '' },
+  },
+];
+
+const sanitizeBlocks = (blocks: any[]): any[] => {
+  if (!Array.isArray(blocks)) return [];
+  const validBlocks: any[] = [];
+
+  for (const rawBlock of blocks) {
+    if (!rawBlock || typeof rawBlock !== 'object') continue;
+    const { type } = rawBlock;
+    if (!type || typeof type !== 'string') continue;
+    const payload = rawBlock[type];
+    if (!payload || typeof payload !== 'object') continue;
+
+    let sanitizedPayload = { ...payload };
+    if (TEXT_BLOCK_TYPES.has(type)) {
+      const rawRichText = Array.isArray(payload.rich_text) ? payload.rich_text.filter(isRichTextItemValid) : [];
+      const hasChildren = Array.isArray(rawBlock.children) && rawBlock.children.length > 0;
+      const richText = rawRichText.length ? rawRichText : hasChildren ? createEmptyRichText() : rawRichText;
+      if (richText.length === 0 && !hasChildren) continue;
+      sanitizedPayload = {
+        ...sanitizedPayload,
+        rich_text: richText,
+      };
+    }
+
+    const sanitizedChildren = sanitizeBlocks(rawBlock.children);
+    const sanitizedBlock: any = {
+      type,
+      [type]: sanitizedPayload,
+    };
+    if (sanitizedChildren.length) {
+      sanitizedBlock.children = sanitizedChildren;
+    }
+    validBlocks.push(sanitizedBlock);
+  }
+
+  return validBlocks;
+};
+
 const markdownToBlocks = (markdown: string) => martianMarkdownToBlocks(markdown);
 
 const toRichText = (text: string) =>
@@ -160,8 +226,12 @@ const getAssistantFirstTimestamp = (group: AgentGroup) => {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const appendChildren = async (client: NotionRequester, blockId: string, children: any[]) => {
-  if (!children.length) return;
-  const chunks = chunkArray(children, NOTION_CHILD_LIMIT);
+  if (!Array.isArray(children) || children.length === 0) return;
+  const sanitized = sanitizeBlocks(children);
+  if (!sanitized.length) {
+    return;
+  }
+  const chunks = chunkArray(sanitized, NOTION_CHILD_LIMIT);
   for (const chunk of chunks) {
     await client(`/blocks/${blockId}/children`, {
       method: 'PATCH',
@@ -233,8 +303,9 @@ const updatePageWithChildren = async (client: NotionRequester, pageId: string, b
 
 const createPageWithChildren = async (client: NotionRequester, body: Record<string, any>) => {
   const { children = [], ...rest } = body;
-  const initialChildren = children.slice(0, NOTION_CHILD_LIMIT);
-  const remainingChildren = children.slice(NOTION_CHILD_LIMIT);
+  const sanitized = sanitizeBlocks(children);
+  const initialChildren = sanitized.slice(0, NOTION_CHILD_LIMIT);
+  const remainingChildren = sanitized.slice(NOTION_CHILD_LIMIT);
 
   const page = await client<{ id: string }>('/pages', {
     body: {
