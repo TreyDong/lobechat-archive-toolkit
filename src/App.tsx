@@ -19,8 +19,7 @@ const App = () => {
             LobeChat 备份一键转换
           </h1>
           <p className="mt-4 max-w-2xl text-base text-slate-300 md:text-lg">
-            上传 LobeChat 的 JSON 备份，立即在浏览器内解析并导出为结构化 Markdown。支持自定义扩展，未来还可直接同步
-            Notion、飞书等知识库。
+            上传 LobeChat 的 JSON 备份，立即在浏览器内解析、整理，并导出为结构化 Markdown 或同步到 Notion 等常用知识库。
           </p>
         </header>
 
