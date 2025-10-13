@@ -20,6 +20,7 @@ type NotionRequestInit = Omit<RequestInit, 'body'> & { body?: any };
 type NotionRequester = <T = any>(path: string, init?: NotionRequestInit) => Promise<T>;
 
 const NOTION_VERSION = '2022-06-28';
+const NOTION_CHILD_LIMIT = 100;
 
 const chunkText = (input: string, maxLength = 1800): string[] => {
   if (!input) return [''];
@@ -28,6 +29,15 @@ const chunkText = (input: string, maxLength = 1800): string[] => {
     chunks.push(input.slice(index, index + maxLength));
   }
   return chunks.length ? chunks : [''];
+};
+
+const chunkArray = <T>(items: T[], size: number): T[][] => {
+  if (size <= 0) return [items];
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 };
 
 const markdownToBlocks = (markdown: string) => martianMarkdownToBlocks(markdown);
@@ -103,6 +113,37 @@ const findRichTextPropertyByName = (database: any, targetName: string) => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const appendChildren = async (client: NotionRequester, blockId: string, children: any[]) => {
+  if (!children.length) return;
+  const chunks = chunkArray(children, NOTION_CHILD_LIMIT);
+  for (const chunk of chunks) {
+    await client(`/blocks/${blockId}/children`, {
+      method: 'PATCH',
+      body: { children: chunk },
+    });
+    await sleep(200);
+  }
+};
+
+const createPageWithChildren = async (client: NotionRequester, body: Record<string, any>) => {
+  const { children = [], ...rest } = body;
+  const initialChildren = children.slice(0, NOTION_CHILD_LIMIT);
+  const remainingChildren = children.slice(NOTION_CHILD_LIMIT);
+
+  const page = await client<{ id: string }>('/pages', {
+    body: {
+      ...rest,
+      ...(initialChildren.length ? { children: initialChildren } : {}),
+    },
+  });
+
+  if (remainingChildren.length) {
+    await appendChildren(client, page.id, remainingChildren);
+  }
+
+  return page;
+};
+
 const exportAsPages = async (
   client: NotionRequester,
   groups: AgentGroup[],
@@ -134,21 +175,19 @@ const exportAsPages = async (
       for (const topic of session.topics) {
         const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel);
         emit(`  -> Creating topic page: ${topic.topicLabel}`);
-        await client('/pages', {
-          body: {
-            parent: { page_id: assistantPage.id },
-            properties: {
-              title: {
-                title: [
-                  {
-                    type: 'text',
-                    text: { content: topic.topicLabel },
-                  },
-                ],
-              },
+        await createPageWithChildren(client, {
+          parent: { page_id: assistantPage.id },
+          properties: {
+            title: {
+              title: [
+                {
+                  type: 'text',
+                  text: { content: topic.topicLabel },
+                },
+              ],
             },
-            children: markdownToBlocks(markdown),
           },
+          children: markdownToBlocks(markdown),
         });
         await sleep(200);
       }
@@ -226,12 +265,10 @@ const exportToDatabases = async (
           };
         }
 
-        await client('/pages', {
-          body: {
-            parent: { database_id: conversationDb.id },
-            properties,
-            children: markdownToBlocks(markdown),
-          },
+        await createPageWithChildren(client, {
+          parent: { database_id: conversationDb.id },
+          properties,
+          children: markdownToBlocks(markdown),
         });
         await sleep(200);
       }
