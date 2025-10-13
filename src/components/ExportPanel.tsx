@@ -8,16 +8,21 @@ export const ExportPanel = () => {
   const parsed = useAppStore((state) => state.parsed);
   const isExporting = useAppStore((state) => state.isExporting);
   const setExporting = useAppStore((state) => state.setExporting);
+  const shouldStopExport = useAppStore((state) => state.shouldStopExport);
+  const requestExportStop = useAppStore((state) => state.requestExportStop);
+  const resetExportStop = useAppStore((state) => state.resetExportStop);
   const appendLog = useAppStore((state) => state.appendLog);
 
   const [notionToken, setNotionToken] = useState('');
   const [assistantDatabaseId, setAssistantDatabaseId] = useState('');
   const [conversationDatabaseId, setConversationDatabaseId] = useState('');
   const [notionProxyUrl, setNotionProxyUrl] = useState('');
+  const [isNotionExportRunning, setNotionExportRunning] = useState(false);
 
   const handleMarkdownExport = async () => {
     if (!parsed) return;
     setExporting(true);
+    resetExportStop();
     appendLog('开始生成 Markdown 压缩包…', 'info');
     try {
       const archive = await createMarkdownArchive(parsed);
@@ -38,6 +43,8 @@ export const ExportPanel = () => {
     }
     const useDatabase = assistantDatabaseId.trim() && conversationDatabaseId.trim();
     setExporting(true);
+    setNotionExportRunning(true);
+    resetExportStop();
     appendLog(useDatabase ? '开始同步到 Notion 数据库…' : '开始在 Notion 创建页面…', 'info');
     try {
       await exportToNotion({
@@ -49,6 +56,7 @@ export const ExportPanel = () => {
           proxyUrl: notionProxyUrl.trim() || undefined,
         },
         log: appendLog,
+        shouldStop: () => useAppStore.getState().shouldStopExport,
       });
       appendLog('Notion 导出完成', 'success');
     } catch (error) {
@@ -58,11 +66,15 @@ export const ExportPanel = () => {
           'Notion 导出失败：浏览器无法直接访问 Notion API，请在设置中填写代理地址或改用服务端中转。',
           'error',
         );
+      } else if (message === '用户已停止 Notion 导出') {
+        appendLog('Notion 导出已停止', 'info');
       } else {
         appendLog(`Notion 导出失败：${message}`, 'error');
       }
     } finally {
       setExporting(false);
+      setNotionExportRunning(false);
+      resetExportStop();
     }
   };
 
@@ -128,6 +140,21 @@ export const ExportPanel = () => {
           >
             {isExporting ? '同步中…' : '同步到 Notion'}
           </button>
+          {isNotionExportRunning && (
+            <button
+              type="button"
+              onClick={() => {
+                if (!shouldStopExport) {
+                  requestExportStop();
+                  appendLog('已请求停止 Notion 导出，稍后将终止当前任务…', 'info');
+                }
+              }}
+              disabled={shouldStopExport}
+              className="rounded-full border border-red-500/60 px-5 py-2 text-sm text-red-300 transition hover:border-red-400 hover:text-red-200 disabled:cursor-not-allowed disabled:border-red-900 disabled:text-red-700"
+            >
+              {shouldStopExport ? '正在停止…' : '停止导出'}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {

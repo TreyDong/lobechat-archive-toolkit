@@ -14,6 +14,7 @@ export interface NotionExportOptions {
   parsed: ParsedData;
   config: NotionExportConfig;
   log?: (message: string, level?: LogLevel) => void;
+  shouldStop?: () => boolean;
 }
 
 type NotionRequestInit = Omit<RequestInit, 'body'> & { body?: any };
@@ -106,6 +107,24 @@ const sanitizeBlocks = (blocks: any[]): any[] => {
   }
 
   return validBlocks;
+};
+
+type CancellationGuard = () => void;
+
+const createCancellationGuard = (
+  shouldStop: (() => boolean) | undefined,
+  emit?: (message: string, level?: LogLevel) => void,
+): CancellationGuard => {
+  let notified = false;
+  return () => {
+    if (shouldStop?.()) {
+      if (!notified) {
+        emit?.('检测到停止请求，终止 Notion 导出', 'info');
+        notified = true;
+      }
+      throw new Error('用户已停止 Notion 导出');
+    }
+  };
 };
 
 const markdownToBlocks = (markdown: string) => martianMarkdownToBlocks(markdown);
@@ -227,7 +246,12 @@ const getAssistantFirstTimestamp = (group: AgentGroup) => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const appendChildren = async (client: NotionRequester, blockId: string, children: any[]) => {
+const appendChildren = async (
+  client: NotionRequester,
+  blockId: string,
+  children: any[],
+  assertNotCancelled?: CancellationGuard,
+) => {
   if (!Array.isArray(children) || children.length === 0) return;
   const sanitized = sanitizeBlocks(children);
   if (!sanitized.length) {
@@ -235,11 +259,14 @@ const appendChildren = async (client: NotionRequester, blockId: string, children
   }
   const chunks = chunkArray(sanitized, NOTION_CHILD_LIMIT);
   for (const chunk of chunks) {
+    assertNotCancelled?.();
     await client(`/blocks/${blockId}/children`, {
       method: 'PATCH',
       body: { children: chunk },
     });
+    assertNotCancelled?.();
     await sleep(200);
+    assertNotCancelled?.();
   }
 };
 
@@ -247,77 +274,107 @@ const findPageInDatabase = async (
   client: NotionRequester,
   databaseId: string,
   filter: Record<string, any>,
+  assertNotCancelled?: CancellationGuard,
 ) => {
+  assertNotCancelled?.();
   const response = await client<{ results: Array<{ id: string }> }>(`/databases/${databaseId}/query`, {
     body: {
       filter,
       page_size: 1,
     },
   });
+  assertNotCancelled?.();
   return response.results?.[0];
 };
 
-const getAllChildBlocks = async (client: NotionRequester, blockId: string) => {
+const getAllChildBlocks = async (
+  client: NotionRequester,
+  blockId: string,
+  assertNotCancelled?: CancellationGuard,
+) => {
   const blocks: Array<{ id: string }> = [];
   let cursor: string | undefined;
   do {
+    assertNotCancelled?.();
     const path = `/blocks/${blockId}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ''}`;
     const response = await client<{
       results: Array<{ id: string }>;
       has_more?: boolean;
       next_cursor?: string | null;
     }>(path, { method: 'GET' });
+    assertNotCancelled?.();
     blocks.push(...response.results);
     cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
   } while (cursor);
   return blocks;
 };
 
-const replaceChildren = async (client: NotionRequester, blockId: string, children: any[]) => {
-  const existing = await getAllChildBlocks(client, blockId);
+const replaceChildren = async (
+  client: NotionRequester,
+  blockId: string,
+  children: any[],
+  assertNotCancelled?: CancellationGuard,
+) => {
+  const existing = await getAllChildBlocks(client, blockId, assertNotCancelled);
   if (existing.length) {
     for (const block of existing) {
+      assertNotCancelled?.();
       await client(`/blocks/${block.id}`, {
         method: 'PATCH',
         body: { archived: true },
       });
+      assertNotCancelled?.();
       await sleep(200);
+      assertNotCancelled?.();
     }
   }
   if (children.length) {
-    await appendChildren(client, blockId, children);
+    await appendChildren(client, blockId, children, assertNotCancelled);
   }
 };
 
-const updatePageWithChildren = async (client: NotionRequester, pageId: string, body: Record<string, any>) => {
+const updatePageWithChildren = async (
+  client: NotionRequester,
+  pageId: string,
+  body: Record<string, any>,
+  assertNotCancelled?: CancellationGuard,
+) => {
   const { children, parent: _parent, ...rest } = body;
   if (Object.keys(rest).length > 0) {
+    assertNotCancelled?.();
     await client(`/pages/${pageId}`, {
       method: 'PATCH',
       body: rest,
     });
+    assertNotCancelled?.();
   }
   if (Array.isArray(children)) {
-    await replaceChildren(client, pageId, children);
+    await replaceChildren(client, pageId, children, assertNotCancelled);
   }
   return { id: pageId };
 };
 
-const createPageWithChildren = async (client: NotionRequester, body: Record<string, any>) => {
+const createPageWithChildren = async (
+  client: NotionRequester,
+  body: Record<string, any>,
+  assertNotCancelled?: CancellationGuard,
+) => {
   const { children = [], ...rest } = body;
   const sanitized = sanitizeBlocks(children);
   const initialChildren = sanitized.slice(0, NOTION_CHILD_LIMIT);
   const remainingChildren = sanitized.slice(NOTION_CHILD_LIMIT);
 
+  assertNotCancelled?.();
   const page = await client<{ id: string }>('/pages', {
     body: {
       ...rest,
       ...(initialChildren.length ? { children: initialChildren } : {}),
     },
   });
+  assertNotCancelled?.();
 
   if (remainingChildren.length) {
-    await appendChildren(client, page.id, remainingChildren);
+    await appendChildren(client, page.id, remainingChildren, assertNotCancelled);
   }
 
   return page;
@@ -327,48 +384,67 @@ const exportAsPages = async (
   client: NotionRequester,
   groups: AgentGroup[],
   log?: NotionExportOptions['log'],
+  shouldStop?: () => boolean,
 ) => {
   const emit = (message: string, level: LogLevel = 'info') => {
     if (log) log(message, level);
   };
+  const assertNotCancelled = createCancellationGuard(shouldStop, emit);
 
   for (const group of groups) {
+    assertNotCancelled();
     emit(`Creating assistant page: ${group.agentLabel}`);
-    const assistantPage = await createPageWithChildren(client, {
-      parent: { type: 'workspace', workspace: true },
-      icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-      properties: {
-        title: {
-          title: [
-            {
-              type: 'text',
-              text: { content: group.agentLabel },
-            },
-          ],
+    const assistantPage = await createPageWithChildren(
+      client,
+      {
+        parent: { type: 'workspace', workspace: true },
+        icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+        properties: {
+          title: {
+            title: [
+              {
+                type: 'text',
+                text: { content: group.agentLabel },
+              },
+            ],
+          },
         },
       },
-    });
+      assertNotCancelled,
+    );
+    assertNotCancelled();
 
     for (const session of group.sessions) {
+      assertNotCancelled();
       for (const topic of session.topics) {
-        const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel);
-        emit(`  -> Creating topic page: ${topic.topicLabel}`);
-        await createPageWithChildren(client, {
-          parent: { page_id: assistantPage.id },
-          icon: { type: 'emoji', emoji: TOPIC_EMOJI },
-          properties: {
-            title: {
-              title: [
-                {
-                  type: 'text',
-                  text: { content: topic.topicLabel },
-                },
-              ],
-            },
-          },
-          children: markdownToBlocks(markdown),
+        assertNotCancelled();
+        const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel, {
+          includeMetadata: false,
+          includeSystemPrompt: false,
         });
+        emit(`  -> Creating topic page: ${topic.topicLabel}`);
+        await createPageWithChildren(
+          client,
+          {
+            parent: { page_id: assistantPage.id },
+            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
+            properties: {
+              title: {
+                title: [
+                  {
+                    type: 'text',
+                    text: { content: topic.topicLabel },
+                  },
+                ],
+              },
+            },
+            children: markdownToBlocks(markdown),
+          },
+          assertNotCancelled,
+        );
+        assertNotCancelled();
         await sleep(200);
+        assertNotCancelled();
       }
     }
   }
@@ -380,14 +456,19 @@ const exportToDatabases = async (
   assistantDatabaseId: string,
   conversationDatabaseId: string,
   log?: NotionExportOptions['log'],
+  shouldStop?: () => boolean,
 ) => {
   const emit = (message: string, level: LogLevel = 'info') => {
     if (log) log(message, level);
   };
+  const assertNotCancelled = createCancellationGuard(shouldStop, emit);
 
   emit('Reading Notion database schema');
+  assertNotCancelled();
   const assistantDb = await client<any>(`/databases/${assistantDatabaseId}`, { method: 'GET' });
+  assertNotCancelled();
   const conversationDb = await client<any>(`/databases/${conversationDatabaseId}`, { method: 'GET' });
+  assertNotCancelled();
 
   const assistantTitleProp = findTitleProperty(assistantDb);
   const conversationTitleProp = findTitleProperty(conversationDb);
@@ -412,6 +493,7 @@ const exportToDatabases = async (
   ]);
 
   for (const group of groups) {
+    assertNotCancelled();
     const assistantLabel = group.agentLabel;
     const assistantCreatedAt = getAssistantFirstTimestamp(group);
     const assistantProperties: Record<string, any> = {
@@ -435,33 +517,54 @@ const exportToDatabases = async (
       };
     }
 
-    const existingAssistant = await findPageInDatabase(client, assistantDb.id, {
-      property: assistantTitleProp,
-      title: { equals: assistantLabel },
-    });
+    const existingAssistant = await findPageInDatabase(
+      client,
+      assistantDb.id,
+      {
+        property: assistantTitleProp,
+        title: { equals: assistantLabel },
+      },
+      assertNotCancelled,
+    );
 
     let assistantEntryId: string;
     if (existingAssistant) {
       emit(`Updating assistant record: ${assistantLabel}`);
-      await updatePageWithChildren(client, existingAssistant.id, {
-        icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-        properties: assistantProperties,
-      });
+      await updatePageWithChildren(
+        client,
+        existingAssistant.id,
+        {
+          icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+          properties: assistantProperties,
+        },
+        assertNotCancelled,
+      );
       assistantEntryId = existingAssistant.id;
     } else {
       emit(`Creating assistant record: ${assistantLabel}`);
-      const assistantEntry = await createPageWithChildren(client, {
-        parent: { database_id: assistantDb.id },
-        icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-        properties: assistantProperties,
-      });
+      const assistantEntry = await createPageWithChildren(
+        client,
+        {
+          parent: { database_id: assistantDb.id },
+          icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+          properties: assistantProperties,
+        },
+        assertNotCancelled,
+      );
       assistantEntryId = assistantEntry.id;
     }
+    assertNotCancelled();
     await sleep(200);
+    assertNotCancelled();
 
     for (const session of group.sessions) {
+      assertNotCancelled();
       for (const topic of session.topics) {
-        const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel);
+        assertNotCancelled();
+        const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel, {
+          includeMetadata: false,
+          includeSystemPrompt: false,
+        });
         const topicLabel = topic.topicLabel;
         const topicCreatedAt = getEarliestTimestamp([getTopicFirstTimestamp(topic), getSessionFirstTimestamp(session)]);
         const properties: Record<string, any> = {
@@ -489,42 +592,58 @@ const exportToDatabases = async (
         }
 
         const children = markdownToBlocks(markdown);
-        const existingTopic = await findPageInDatabase(client, conversationDb.id, {
-          and: [
-            {
-              property: conversationTitleProp,
-              title: { equals: topicLabel },
-            },
-            {
-              property: relationProp,
-              relation: { contains: assistantEntryId },
-            },
-          ],
-        });
+        const existingTopic = await findPageInDatabase(
+          client,
+          conversationDb.id,
+          {
+            and: [
+              {
+                property: conversationTitleProp,
+                title: { equals: topicLabel },
+              },
+              {
+                property: relationProp,
+                relation: { contains: assistantEntryId },
+              },
+            ],
+          },
+          assertNotCancelled,
+        );
 
         if (existingTopic) {
           emit(`  -> Updating topic record: ${topicLabel}`);
-          await updatePageWithChildren(client, existingTopic.id, {
-            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
-            properties,
-            children,
-          });
+          await updatePageWithChildren(
+            client,
+            existingTopic.id,
+            {
+              icon: { type: 'emoji', emoji: TOPIC_EMOJI },
+              properties,
+              children,
+            },
+            assertNotCancelled,
+          );
         } else {
           emit(`  -> Creating topic record: ${topicLabel}`);
-          await createPageWithChildren(client, {
-            parent: { database_id: conversationDb.id },
-            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
-            properties,
-            children,
-          });
+          await createPageWithChildren(
+            client,
+            {
+              parent: { database_id: conversationDb.id },
+              icon: { type: 'emoji', emoji: TOPIC_EMOJI },
+              properties,
+              children,
+            },
+            assertNotCancelled,
+          );
         }
+        assertNotCancelled();
         await sleep(200);
+        assertNotCancelled();
       }
     }
   }
 };
 
-export const exportToNotion = async ({ parsed, config, log }: NotionExportOptions) => {
+export const exportToNotion = async ({ parsed, config, log, shouldStop }: NotionExportOptions) => {
   if (!config.token) {
     throw new Error('缺少 Notion Token');
   }
@@ -547,8 +666,9 @@ export const exportToNotion = async ({ parsed, config, log }: NotionExportOption
       config.assistantDatabaseId!,
       config.conversationDatabaseId!,
       log,
+      shouldStop,
     );
   } else {
-    await exportAsPages(client, parsed.groups, log);
+    await exportAsPages(client, parsed.groups, log, shouldStop);
   }
 };

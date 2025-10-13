@@ -429,35 +429,45 @@ export const buildMarkdownForTopic = (
   session: LobeSession | undefined,
   topicGroup: TopicGroup,
   agentLabel: string,
+  options?: {
+    includeMetadata?: boolean;
+    includeSystemPrompt?: boolean;
+  },
 ): string => {
   const { topic, topicLabel, messages } = topicGroup;
   const lines: string[] = [`# ${topicLabel}`, ''];
+  const includeMetadata = options?.includeMetadata ?? true;
+  const includeSystemPrompt = options?.includeSystemPrompt ?? true;
 
-  const sessionMeta = {
-    'Session Title': session?.title ?? null,
-    'Session Slug': session?.slug ?? null,
-    'Session ID': session?.id ?? null,
-    'Session Created': session?.createdAt ?? null,
-    'Session Updated': session?.updatedAt ?? null,
-  };
-  lines.push(...formatMetadataBlock('Session', sessionMeta));
+  if (includeMetadata) {
+    const sessionMeta = {
+      'Session Title': session?.title ?? null,
+      'Session Slug': session?.slug ?? null,
+      'Session ID': session?.id ?? null,
+      'Session Created': session?.createdAt ?? null,
+      'Session Updated': session?.updatedAt ?? null,
+    };
+    lines.push(...formatMetadataBlock('Session', sessionMeta));
 
-  const topicMeta = {
-    'Topic ID': topic?.id ?? topicGroup.topicId,
-    'Topic Created': topic?.createdAt ?? null,
-    'Topic Updated': topic?.updatedAt ?? null,
-  };
-  lines.push(...formatMetadataBlock('Topic', topicMeta));
+    const topicMeta = {
+      'Topic ID': topic?.id ?? topicGroup.topicId,
+      'Topic Created': topic?.createdAt ?? null,
+      'Topic Updated': topic?.updatedAt ?? null,
+    };
+    lines.push(...formatMetadataBlock('Topic', topicMeta));
+  }
 
   if (agent) {
-    const agentMeta = {
-      'Agent Title': agent.title ?? agent.slug ?? agentLabel,
-      'Agent ID': agent.id,
-      Model: agent.model ?? null,
-      Provider: agent.provider ?? null,
-    };
-    lines.push(...formatMetadataBlock('Agent', agentMeta));
-    if (agent.systemRole) {
+    if (includeMetadata) {
+      const agentMeta = {
+        'Agent Title': agent.title ?? agent.slug ?? agentLabel,
+        'Agent ID': agent.id,
+        Model: agent.model ?? null,
+        Provider: agent.provider ?? null,
+      };
+      lines.push(...formatMetadataBlock('Agent', agentMeta));
+    }
+    if (includeSystemPrompt && agent.systemRole) {
       lines.push('## System Prompt', '');
       lines.push('```', agent.systemRole, '```', '');
     }
