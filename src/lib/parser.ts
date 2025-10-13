@@ -151,7 +151,8 @@ const deriveSessionLabel = (
   topicOrder: string[],
 ) => {
   const sessionId = session?.id ?? 'session';
-  const datePrefix = session?.createdAt?.slice(0, 10);
+  const datePrefix =
+    formatChinaDate(session?.createdAt ?? session?.updatedAt ?? null) ?? undefined;
   let topicTitle: string | undefined;
   let snippet: string | undefined;
 
@@ -227,7 +228,8 @@ const prettifyContent = (raw: unknown): string[] => {
 const formatMessages = (messages: LobeMessage[]): string[] => {
   const lines: string[] = ['## Messages', ''];
   for (const message of messages) {
-    const timestamp = message.createdAt ?? message.updatedAt ?? 'unknown time';
+    const timestamp =
+      formatChinaDateTime(message.createdAt ?? message.updatedAt ?? null) ?? 'unknown time';
     const role = message.role.charAt(0).toUpperCase() + message.role.slice(1);
     lines.push(`### ${timestamp} - ${role}`, '');
     lines.push(...prettifyContent(message.content));
@@ -444,15 +446,15 @@ export const buildMarkdownForTopic = (
       'Session Title': session?.title ?? null,
       'Session Slug': session?.slug ?? null,
       'Session ID': session?.id ?? null,
-      'Session Created': session?.createdAt ?? null,
-      'Session Updated': session?.updatedAt ?? null,
+      'Session Created': formatChinaDateTime(session?.createdAt ?? null) ?? null,
+      'Session Updated': formatChinaDateTime(session?.updatedAt ?? null) ?? null,
     };
     lines.push(...formatMetadataBlock('Session', sessionMeta));
 
     const topicMeta = {
       'Topic ID': topic?.id ?? topicGroup.topicId,
-      'Topic Created': topic?.createdAt ?? null,
-      'Topic Updated': topic?.updatedAt ?? null,
+      'Topic Created': formatChinaDateTime(topic?.createdAt ?? null) ?? null,
+      'Topic Updated': formatChinaDateTime(topic?.updatedAt ?? null) ?? null,
     };
     lines.push(...formatMetadataBlock('Topic', topicMeta));
   }
@@ -521,3 +523,4 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
 
   return { files, indexPath };
 };
+import { formatChinaDate, formatChinaDateTime } from './datetime';

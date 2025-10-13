@@ -2,6 +2,7 @@ import { markdownToBlocks as martianMarkdownToBlocks } from '@tryfabric/martian'
 import type { ParsedData, AgentGroup, SessionGroup, TopicGroup } from '../parser';
 import { buildMarkdownForTopic } from '../parser';
 import type { LogLevel } from '../../stores/useAppStore';
+import { formatChinaDateTimeForNotion, parseDateInput } from '../datetime';
 
 export interface NotionExportConfig {
   token: string;
@@ -213,12 +214,12 @@ const findDatePropertyByNames = (database: any, targetNames: string[]) => {
 };
 
 const getEarliestTimestamp = (timestamps: Array<string | null | undefined>) => {
-  const sanitized = timestamps
-    .map((value) => (value ? value.trim() : undefined))
-    .filter((value): value is string => Boolean(value));
-  if (!sanitized.length) return undefined;
-  sanitized.sort();
-  return sanitized[0];
+  const candidates = timestamps
+    .map((value) => parseDateInput(value ?? undefined))
+    .filter((value): value is Date => Boolean(value))
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (!candidates.length) return undefined;
+  return formatChinaDateTimeForNotion(candidates[0]);
 };
 
 const getTopicFirstTimestamp = (topic: TopicGroup) =>
