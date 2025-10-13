@@ -1,5 +1,5 @@
 import { markdownToBlocks as martianMarkdownToBlocks } from '@tryfabric/martian';
-import type { ParsedData, AgentGroup } from '../parser';
+import type { ParsedData, AgentGroup, SessionGroup, TopicGroup } from '../parser';
 import { buildMarkdownForTopic } from '../parser';
 import type { LogLevel } from '../../stores/useAppStore';
 
@@ -111,6 +111,52 @@ const findRichTextPropertyByName = (database: any, targetName: string) => {
   return entry ? entry[0] : undefined;
 };
 
+const normalizePropertyName = (input: string) => input.toLowerCase().replace(/\s+/g, '');
+
+const findDatePropertyByNames = (database: any, targetNames: string[]) => {
+  const normalizedTargets = targetNames.map(normalizePropertyName);
+  const dateEntries = Object.entries(database.properties).filter(([, prop]: any) => prop.type === 'date');
+  const direct = dateEntries.find(([name]) => normalizedTargets.includes(normalizePropertyName(name)));
+  if (direct) return direct[0];
+  const fallback = dateEntries.find(([name]) => {
+    const normalized = normalizePropertyName(name);
+    return normalized.includes('created') || name.includes('鍒涘缓');
+  });
+  return fallback ? fallback[0] : undefined;
+};
+
+const getEarliestTimestamp = (timestamps: Array<string | null | undefined>) => {
+  const sanitized = timestamps
+    .map((value) => (value ? value.trim() : undefined))
+    .filter((value): value is string => Boolean(value));
+  if (!sanitized.length) return undefined;
+  sanitized.sort();
+  return sanitized[0];
+};
+
+const getTopicFirstTimestamp = (topic: TopicGroup) =>
+  getEarliestTimestamp([
+    topic.topic?.createdAt,
+    topic.topic?.updatedAt,
+    ...topic.messages.map((message) => message.createdAt ?? message.updatedAt),
+  ]);
+
+const getSessionFirstTimestamp = (sessionGroup: SessionGroup) =>
+  getEarliestTimestamp([
+    sessionGroup.session?.createdAt,
+    sessionGroup.session?.updatedAt,
+    ...sessionGroup.topics.map((topic) => getTopicFirstTimestamp(topic)),
+  ]);
+
+const getAssistantFirstTimestamp = (group: AgentGroup) => {
+  const agent = group.agent as { createdAt?: string | null; updatedAt?: string | null } | undefined;
+  return getEarliestTimestamp([
+    agent?.createdAt,
+    agent?.updatedAt,
+    ...group.sessions.map((session) => getSessionFirstTimestamp(session)),
+  ]);
+};
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const appendChildren = async (client: NotionRequester, blockId: string, children: any[]) => {
@@ -123,6 +169,66 @@ const appendChildren = async (client: NotionRequester, blockId: string, children
     });
     await sleep(200);
   }
+};
+
+const findPageInDatabase = async (
+  client: NotionRequester,
+  databaseId: string,
+  filter: Record<string, any>,
+) => {
+  const response = await client<{ results: Array<{ id: string }> }>(`/databases/${databaseId}/query`, {
+    body: {
+      filter,
+      page_size: 1,
+    },
+  });
+  return response.results?.[0];
+};
+
+const getAllChildBlocks = async (client: NotionRequester, blockId: string) => {
+  const blocks: Array<{ id: string }> = [];
+  let cursor: string | undefined;
+  do {
+    const path = `/blocks/${blockId}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ''}`;
+    const response = await client<{
+      results: Array<{ id: string }>;
+      has_more?: boolean;
+      next_cursor?: string | null;
+    }>(path, { method: 'GET' });
+    blocks.push(...response.results);
+    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+  } while (cursor);
+  return blocks;
+};
+
+const replaceChildren = async (client: NotionRequester, blockId: string, children: any[]) => {
+  const existing = await getAllChildBlocks(client, blockId);
+  if (existing.length) {
+    for (const block of existing) {
+      await client(`/blocks/${block.id}`, {
+        method: 'PATCH',
+        body: { archived: true },
+      });
+      await sleep(200);
+    }
+  }
+  if (children.length) {
+    await appendChildren(client, blockId, children);
+  }
+};
+
+const updatePageWithChildren = async (client: NotionRequester, pageId: string, body: Record<string, any>) => {
+  const { children, parent: _parent, ...rest } = body;
+  if (Object.keys(rest).length > 0) {
+    await client(`/pages/${pageId}`, {
+      method: 'PATCH',
+      body: rest,
+    });
+  }
+  if (Array.isArray(children)) {
+    await replaceChildren(client, pageId, children);
+  }
+  return { id: pageId };
 };
 
 const createPageWithChildren = async (client: NotionRequester, body: Record<string, any>) => {
@@ -215,15 +321,32 @@ const exportToDatabases = async (
   const relationProp = findAssistantRelationProperty(conversationDb, assistantDb.id);
   const sessionProp = findSessionRichTextProperty(conversationDb);
   const promptProp = findRichTextPropertyByName(assistantDb, 'prompt');
+  const assistantCreatedProp = findDatePropertyByNames(assistantDb, [
+    'created date',
+    'created at',
+    'creation date',
+    '鍒涘缓鏃ユ湡',
+    '鍒涘缓鏃堕棿',
+  ]);
+  const conversationCreatedProp = findDatePropertyByNames(conversationDb, [
+    'created date',
+    'created at',
+    'creation date',
+    'session created',
+    'topic created',
+    '鍒涘缓鏃ユ湡',
+    '鍒涘缓鏃堕棿',
+  ]);
 
   for (const group of groups) {
-    emit(`Writing assistant record: ${group.agentLabel}`);
+    const assistantLabel = group.agentLabel;
+    const assistantCreatedAt = getAssistantFirstTimestamp(group);
     const assistantProperties: Record<string, any> = {
       [assistantTitleProp]: {
         title: [
           {
             type: 'text',
-            text: { content: group.agentLabel },
+            text: { content: assistantLabel },
           },
         ],
       },
@@ -233,30 +356,48 @@ const exportToDatabases = async (
         rich_text: toRichText(group.agent.systemRole),
       };
     }
+    if (assistantCreatedProp && assistantCreatedAt) {
+      assistantProperties[assistantCreatedProp] = {
+        date: { start: assistantCreatedAt },
+      };
+    }
 
-    const assistantEntry = await client<{ id: string }>('/pages', {
-      body: {
+    const existingAssistant = await findPageInDatabase(client, assistantDb.id, {
+      property: assistantTitleProp,
+      title: { equals: assistantLabel },
+    });
+
+    let assistantEntryId: string;
+    if (existingAssistant) {
+      emit(`Updating assistant record: ${assistantLabel}`);
+      await updatePageWithChildren(client, existingAssistant.id, { properties: assistantProperties });
+      assistantEntryId = existingAssistant.id;
+    } else {
+      emit(`Creating assistant record: ${assistantLabel}`);
+      const assistantEntry = await createPageWithChildren(client, {
         parent: { database_id: assistantDb.id },
         properties: assistantProperties,
-      },
-    });
+      });
+      assistantEntryId = assistantEntry.id;
+    }
     await sleep(200);
 
     for (const session of group.sessions) {
       for (const topic of session.topics) {
         const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel);
-        emit(`  -> Writing topic record: ${topic.topicLabel}`);
+        const topicLabel = topic.topicLabel;
+        const topicCreatedAt = getEarliestTimestamp([getTopicFirstTimestamp(topic), getSessionFirstTimestamp(session)]);
         const properties: Record<string, any> = {
           [conversationTitleProp]: {
             title: [
               {
                 type: 'text',
-                text: { content: topic.topicLabel },
+                text: { content: topicLabel },
               },
             ],
           },
           [relationProp]: {
-            relation: [{ id: assistantEntry.id }],
+            relation: [{ id: assistantEntryId }],
           },
         };
         if (sessionProp) {
@@ -264,12 +405,40 @@ const exportToDatabases = async (
             rich_text: toRichText(session.sessionLabel),
           };
         }
+        if (conversationCreatedProp && topicCreatedAt) {
+          properties[conversationCreatedProp] = {
+            date: { start: topicCreatedAt },
+          };
+        }
 
-        await createPageWithChildren(client, {
-          parent: { database_id: conversationDb.id },
-          properties,
-          children: markdownToBlocks(markdown),
+        const children = markdownToBlocks(markdown);
+        const existingTopic = await findPageInDatabase(client, conversationDb.id, {
+          and: [
+            {
+              property: conversationTitleProp,
+              title: { equals: topicLabel },
+            },
+            {
+              property: relationProp,
+              relation: { contains: assistantEntryId },
+            },
+          ],
         });
+
+        if (existingTopic) {
+          emit(`  -> Updating topic record: ${topicLabel}`);
+          await updatePageWithChildren(client, existingTopic.id, {
+            properties,
+            children,
+          });
+        } else {
+          emit(`  -> Creating topic record: ${topicLabel}`);
+          await createPageWithChildren(client, {
+            parent: { database_id: conversationDb.id },
+            properties,
+            children,
+          });
+        }
         await sleep(200);
       }
     }
@@ -278,11 +447,11 @@ const exportToDatabases = async (
 
 export const exportToNotion = async ({ parsed, config, log }: NotionExportOptions) => {
   if (!config.token) {
-    throw new Error('缺少 Notion Token');
+    throw new Error('缂哄皯 Notion Token');
   }
 
   if (parsed.groups.length === 0) {
-    throw new Error('没有可导出的会话数据');
+    throw new Error('娌℃湁鍙鍑虹殑浼氳瘽鏁版嵁');
   }
 
   const proxyUrl = config.proxyUrl?.trim();
