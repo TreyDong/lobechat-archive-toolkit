@@ -21,6 +21,8 @@ type NotionRequester = <T = any>(path: string, init?: NotionRequestInit) => Prom
 
 const NOTION_VERSION = '2022-06-28';
 const NOTION_CHILD_LIMIT = 100;
+const ASSISTANT_EMOJI = '🤖';
+const TOPIC_EMOJI = '💬';
 
 const chunkText = (input: string, maxLength = 1800): string[] => {
   if (!input) return [''];
@@ -332,18 +334,17 @@ const exportAsPages = async (
 
   for (const group of groups) {
     emit(`Creating assistant page: ${group.agentLabel}`);
-    const assistantPage = await client<{ id: string }>('/pages', {
-      body: {
-        parent: { type: 'workspace', workspace: true },
-        properties: {
-          title: {
-            title: [
-              {
-                type: 'text',
-                text: { content: group.agentLabel },
-              },
-            ],
-          },
+    const assistantPage = await createPageWithChildren(client, {
+      parent: { type: 'workspace', workspace: true },
+      icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+      properties: {
+        title: {
+          title: [
+            {
+              type: 'text',
+              text: { content: group.agentLabel },
+            },
+          ],
         },
       },
     });
@@ -354,6 +355,7 @@ const exportAsPages = async (
         emit(`  -> Creating topic page: ${topic.topicLabel}`);
         await createPageWithChildren(client, {
           parent: { page_id: assistantPage.id },
+          icon: { type: 'emoji', emoji: TOPIC_EMOJI },
           properties: {
             title: {
               title: [
@@ -441,12 +443,16 @@ const exportToDatabases = async (
     let assistantEntryId: string;
     if (existingAssistant) {
       emit(`Updating assistant record: ${assistantLabel}`);
-      await updatePageWithChildren(client, existingAssistant.id, { properties: assistantProperties });
+      await updatePageWithChildren(client, existingAssistant.id, {
+        icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+        properties: assistantProperties,
+      });
       assistantEntryId = existingAssistant.id;
     } else {
       emit(`Creating assistant record: ${assistantLabel}`);
       const assistantEntry = await createPageWithChildren(client, {
         parent: { database_id: assistantDb.id },
+        icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
         properties: assistantProperties,
       });
       assistantEntryId = assistantEntry.id;
@@ -499,6 +505,7 @@ const exportToDatabases = async (
         if (existingTopic) {
           emit(`  -> Updating topic record: ${topicLabel}`);
           await updatePageWithChildren(client, existingTopic.id, {
+            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
             properties,
             children,
           });
@@ -506,6 +513,7 @@ const exportToDatabases = async (
           emit(`  -> Creating topic record: ${topicLabel}`);
           await createPageWithChildren(client, {
             parent: { database_id: conversationDb.id },
+            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
             properties,
             children,
           });
