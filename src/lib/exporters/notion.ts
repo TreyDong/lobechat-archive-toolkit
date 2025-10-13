@@ -222,6 +222,15 @@ const getEarliestTimestamp = (timestamps: Array<string | null | undefined>) => {
   return formatChinaDateTimeForNotion(candidates[0]);
 };
 
+const getLatestTimestamp = (timestamps: Array<string | null | undefined>) => {
+  const candidates = timestamps
+    .map((value) => parseDateInput(value ?? undefined))
+    .filter((value): value is Date => Boolean(value))
+    .sort((a, b) => b.getTime() - a.getTime());
+  if (!candidates.length) return undefined;
+  return formatChinaDateTimeForNotion(candidates[0]);
+};
+
 const getTopicFirstTimestamp = (topic: TopicGroup) =>
   getEarliestTimestamp([
     topic.topic?.createdAt,
@@ -237,17 +246,22 @@ const getSessionFirstTimestamp = (sessionGroup: SessionGroup) =>
   ]);
 
 const getTopicLastTimestamp = (topic: TopicGroup, sessionGroup?: SessionGroup) => {
-  const candidates = [
+  return getLatestTimestamp([
     ...topic.messages.map((message) => message.updatedAt ?? message.createdAt),
     topic.topic?.updatedAt,
     topic.topic?.createdAt,
     sessionGroup?.session?.updatedAt,
-  ];
-  const parsed = candidates
-    .map((value) => parseDateInput(value ?? undefined))
-    .filter((value): value is Date => Boolean(value))
-    .sort((a, b) => b.getTime() - a.getTime());
-  return parsed.length ? formatChinaDateTimeForNotion(parsed[0]) : undefined;
+    sessionGroup?.session?.createdAt,
+  ]);
+};
+
+const getSessionLastTimestamp = (sessionGroup: SessionGroup) => {
+  const topicTimestamps = sessionGroup.topics.map((topic) => getTopicLastTimestamp(topic, sessionGroup));
+  return getLatestTimestamp([
+    sessionGroup.session?.updatedAt,
+    sessionGroup.session?.createdAt,
+    ...topicTimestamps,
+  ]);
 };
 
 const getAssistantFirstTimestamp = (group: AgentGroup) => {
@@ -256,6 +270,15 @@ const getAssistantFirstTimestamp = (group: AgentGroup) => {
     agent?.createdAt,
     agent?.updatedAt,
     ...group.sessions.map((session) => getSessionFirstTimestamp(session)),
+  ]);
+};
+
+const getAssistantLastTimestamp = (group: AgentGroup) => {
+  const agent = group.agent as { createdAt?: string | null; updatedAt?: string | null } | undefined;
+  return getLatestTimestamp([
+    agent?.updatedAt,
+    agent?.createdAt,
+    ...group.sessions.map((session) => getSessionLastTimestamp(session)),
   ]);
 };
 
@@ -497,6 +520,14 @@ const exportToDatabases = async (
     '创建日期',
     '创建时间',
   ]);
+  const assistantUpdatedProp = findDatePropertyByNames(assistantDb, [
+    'updated date',
+    'updated at',
+    'last updated',
+    'assistant updated',
+    '更新日期',
+    '更新时间',
+  ]);
   const conversationCreatedProp = findDatePropertyByNames(conversationDb, [
     'created date',
     'created at',
@@ -520,6 +551,7 @@ const exportToDatabases = async (
     assertNotCancelled();
     const assistantLabel = group.agentLabel;
     const assistantCreatedAt = getAssistantFirstTimestamp(group);
+    const assistantUpdatedAt = getAssistantLastTimestamp(group);
     const assistantProperties: Record<string, any> = {
       [assistantTitleProp]: {
         title: [
@@ -540,6 +572,11 @@ const exportToDatabases = async (
         date: { start: assistantCreatedAt },
       };
     }
+    if (assistantUpdatedProp && assistantUpdatedAt) {
+      assistantProperties[assistantUpdatedProp] = {
+        date: { start: assistantUpdatedAt },
+      };
+    }
 
     const existingAssistant = await findPageInDatabase(
       client,
@@ -553,17 +590,29 @@ const exportToDatabases = async (
 
     let assistantEntryId: string;
     if (existingAssistant) {
-      emit(`Updating assistant record: ${assistantLabel}`);
-      await updatePageWithChildren(
-        client,
-        existingAssistant.id,
-        {
-          icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-          properties: assistantProperties,
-        },
-        assertNotCancelled,
-      );
-      assistantEntryId = existingAssistant.id;
+      const existingUpdatedAt =
+        assistantUpdatedProp && existingAssistant.properties
+          ? existingAssistant.properties[assistantUpdatedProp]?.date?.start ?? undefined
+          : undefined;
+      if (assistantUpdatedProp && assistantUpdatedAt && existingUpdatedAt === assistantUpdatedAt) {
+        emit(`Assistant up-to-date: ${assistantLabel}`);
+        assistantEntryId = existingAssistant.id;
+      } else {
+        emit(`Updating assistant record: ${assistantLabel}`);
+        await updatePageWithChildren(
+          client,
+          existingAssistant.id,
+          {
+            icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+            properties: assistantProperties,
+          },
+          assertNotCancelled,
+        );
+        assistantEntryId = existingAssistant.id;
+        assertNotCancelled();
+        await sleep(200);
+        assertNotCancelled();
+      }
     } else {
       emit(`Creating assistant record: ${assistantLabel}`);
       const assistantEntry = await createPageWithChildren(
@@ -576,10 +625,10 @@ const exportToDatabases = async (
         assertNotCancelled,
       );
       assistantEntryId = assistantEntry.id;
+      assertNotCancelled();
+      await sleep(200);
+      assertNotCancelled();
     }
-    assertNotCancelled();
-    await sleep(200);
-    assertNotCancelled();
 
     for (const session of group.sessions) {
       assertNotCancelled();
