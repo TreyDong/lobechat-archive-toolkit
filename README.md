@@ -1,4 +1,4 @@
-# LobeChat 历史记录导出工具
+# LobeChat Archive Toolkit
 
 专为 LobeChat 备份文件打造的 Web 应用，支持解析原始 JSON、浏览会话结构、导出 Markdown 压缩包，以及将数据直接同步到 Notion 数据库或页面。
 
@@ -14,7 +14,7 @@
 
 ## 目录结构
 ```
-webapp/
+lobechat-archive-toolkit/
 ├─ dist/                       # 构建结果（构建后生成）
 ├─ netlify/
 │  └─ functions/
