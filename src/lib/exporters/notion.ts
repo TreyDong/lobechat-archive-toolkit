@@ -567,7 +567,7 @@ const exportToDatabases = async (
           includeSystemPrompt: false,
         });
         const topicLabel = topic.topicLabel;
-        const topicCreatedAt = getEarliestTimestamp([getTopicFirstTimestamp(topic), getSessionFirstTimestamp(session)]);
+        const topicCreatedAt = getTopicFirstTimestamp(topic) ?? getSessionFirstTimestamp(session);
         const properties: Record<string, any> = {
           [conversationTitleProp]: {
             title: [
