@@ -236,6 +236,20 @@ const getSessionFirstTimestamp = (sessionGroup: SessionGroup) =>
     ...sessionGroup.topics.map((topic) => getTopicFirstTimestamp(topic)),
   ]);
 
+const getTopicLastTimestamp = (topic: TopicGroup, sessionGroup?: SessionGroup) => {
+  const candidates = [
+    ...topic.messages.map((message) => message.updatedAt ?? message.createdAt),
+    topic.topic?.updatedAt,
+    topic.topic?.createdAt,
+    sessionGroup?.session?.updatedAt,
+  ];
+  const parsed = candidates
+    .map((value) => parseDateInput(value ?? undefined))
+    .filter((value): value is Date => Boolean(value))
+    .sort((a, b) => b.getTime() - a.getTime());
+  return parsed.length ? formatChinaDateTimeForNotion(parsed[0]) : undefined;
+};
+
 const getAssistantFirstTimestamp = (group: AgentGroup) => {
   const agent = group.agent as { createdAt?: string | null; updatedAt?: string | null } | undefined;
   return getEarliestTimestamp([
@@ -278,7 +292,7 @@ const findPageInDatabase = async (
   assertNotCancelled?: CancellationGuard,
 ) => {
   assertNotCancelled?.();
-  const response = await client<{ results: Array<{ id: string }> }>(`/databases/${databaseId}/query`, {
+  const response = await client<{ results: Array<any> }>(`/databases/${databaseId}/query`, {
     body: {
       filter,
       page_size: 1,
@@ -492,6 +506,15 @@ const exportToDatabases = async (
     '创建日期',
     '创建时间',
   ]);
+  const conversationUpdatedProp = findDatePropertyByNames(conversationDb, [
+    'updated date',
+    'updated at',
+    'last updated',
+    'session updated',
+    'topic updated',
+    '更新日期',
+    '更新时间',
+  ]);
 
   for (const group of groups) {
     assertNotCancelled();
@@ -568,6 +591,7 @@ const exportToDatabases = async (
         });
         const topicLabel = topic.topicLabel;
         const topicCreatedAt = getTopicFirstTimestamp(topic) ?? getSessionFirstTimestamp(session);
+        const topicUpdatedAt = getTopicLastTimestamp(topic, session);
         const properties: Record<string, any> = {
           [conversationTitleProp]: {
             title: [
@@ -591,6 +615,11 @@ const exportToDatabases = async (
             date: { start: topicCreatedAt },
           };
         }
+        if (conversationUpdatedProp && topicUpdatedAt) {
+          properties[conversationUpdatedProp] = {
+            date: { start: topicUpdatedAt },
+          };
+        }
 
         const children = markdownToBlocks(markdown);
         const existingTopic = await findPageInDatabase(
@@ -612,6 +641,14 @@ const exportToDatabases = async (
         );
 
         if (existingTopic) {
+          const existingUpdatedAt =
+            conversationUpdatedProp && existingTopic.properties
+              ? existingTopic.properties[conversationUpdatedProp]?.date?.start ?? undefined
+              : undefined;
+          if (conversationUpdatedProp && topicUpdatedAt && existingUpdatedAt === topicUpdatedAt) {
+            emit(`  -> Skipping topic record (no changes): ${topicLabel}`);
+            continue;
+          }
           emit(`  -> Updating topic record: ${topicLabel}`);
           await updatePageWithChildren(
             client,
