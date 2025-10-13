@@ -1,3 +1,4 @@
+import { markdownToBlocks as martianMarkdownToBlocks } from '@tryfabric/martian';
 import type { ParsedData, AgentGroup } from '../parser';
 import { buildMarkdownForTopic } from '../parser';
 import type { LogLevel } from '../../stores/useAppStore';
@@ -29,19 +30,12 @@ const chunkText = (input: string, maxLength = 1800): string[] => {
   return chunks.length ? chunks : [''];
 };
 
-const markdownToBlocks = (markdown: string) =>
-  chunkText(markdown).map((content) => ({
-    object: 'block',
-    type: 'code',
-    code: {
-      language: 'markdown',
-      rich_text: [
-        {
-          type: 'text',
-          text: { content },
-        },
-      ],
-    },
+const markdownToBlocks = (markdown: string) => martianMarkdownToBlocks(markdown);
+
+const toRichText = (text: string) =>
+  chunkText(text).map((content) => ({
+    type: 'text',
+    text: { content },
   }));
 
 const createNotionRequester = (token: string, baseUrl: string): NotionRequester => {
@@ -95,6 +89,14 @@ const findAssistantRelationProperty = (conversationDb: any, assistantDbId: strin
 const findSessionRichTextProperty = (conversationDb: any) => {
   const entry = Object.entries(conversationDb.properties).find(
     ([name, prop]: any) => prop.type === 'rich_text' && name.toLowerCase() === 'session',
+  );
+  return entry ? entry[0] : undefined;
+};
+
+const findRichTextPropertyByName = (database: any, targetName: string) => {
+  const lower = targetName.toLowerCase();
+  const entry = Object.entries(database.properties).find(
+    ([name, prop]: any) => prop.type === 'rich_text' && name.toLowerCase() === lower,
   );
   return entry ? entry[0] : undefined;
 };
@@ -173,22 +175,30 @@ const exportToDatabases = async (
   const conversationTitleProp = findTitleProperty(conversationDb);
   const relationProp = findAssistantRelationProperty(conversationDb, assistantDb.id);
   const sessionProp = findSessionRichTextProperty(conversationDb);
+  const promptProp = findRichTextPropertyByName(assistantDb, 'prompt');
 
   for (const group of groups) {
     emit(`Writing assistant record: ${group.agentLabel}`);
+    const assistantProperties: Record<string, any> = {
+      [assistantTitleProp]: {
+        title: [
+          {
+            type: 'text',
+            text: { content: group.agentLabel },
+          },
+        ],
+      },
+    };
+    if (promptProp && group.agent?.systemRole) {
+      assistantProperties[promptProp] = {
+        rich_text: toRichText(group.agent.systemRole),
+      };
+    }
+
     const assistantEntry = await client<{ id: string }>('/pages', {
       body: {
         parent: { database_id: assistantDb.id },
-        properties: {
-          [assistantTitleProp]: {
-            title: [
-              {
-                type: 'text',
-                text: { content: group.agentLabel },
-              },
-            ],
-          },
-        },
+        properties: assistantProperties,
       },
     });
     await sleep(200);
@@ -212,12 +222,7 @@ const exportToDatabases = async (
         };
         if (sessionProp) {
           properties[sessionProp] = {
-            rich_text: [
-              {
-                type: 'text',
-                text: { content: session.sessionLabel },
-              },
-            ],
+            rich_text: toRichText(session.sessionLabel),
           };
         }
 
@@ -236,11 +241,11 @@ const exportToDatabases = async (
 
 export const exportToNotion = async ({ parsed, config, log }: NotionExportOptions) => {
   if (!config.token) {
-    throw new Error('缂哄皯 Notion Token');
+    throw new Error('缺少 Notion Token');
   }
 
   if (parsed.groups.length === 0) {
-    throw new Error('娌℃湁鍙鍑虹殑浼氳瘽鏁版嵁');
+    throw new Error('没有可导出的会话数据');
   }
 
   const proxyUrl = config.proxyUrl?.trim();
