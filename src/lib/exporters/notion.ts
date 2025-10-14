@@ -245,24 +245,21 @@ const getSessionFirstTimestamp = (sessionGroup: SessionGroup) =>
     ...sessionGroup.topics.map((topic) => getTopicFirstTimestamp(topic)),
   ]);
 
-const getTopicLastTimestamp = (topic: TopicGroup, sessionGroup?: SessionGroup) => {
-  return getLatestTimestamp([
+const getTopicLastTimestamp = (topic: TopicGroup, sessionGroup?: SessionGroup) =>
+  getLatestTimestamp([
     ...topic.messages.map((message) => message.updatedAt ?? message.createdAt),
     topic.topic?.updatedAt,
     topic.topic?.createdAt,
     sessionGroup?.session?.updatedAt,
     sessionGroup?.session?.createdAt,
   ]);
-};
 
-const getSessionLastTimestamp = (sessionGroup: SessionGroup) => {
-  const topicTimestamps = sessionGroup.topics.map((topic) => getTopicLastTimestamp(topic, sessionGroup));
-  return getLatestTimestamp([
+const getSessionLastTimestamp = (sessionGroup: SessionGroup) =>
+  getLatestTimestamp([
     sessionGroup.session?.updatedAt,
     sessionGroup.session?.createdAt,
-    ...topicTimestamps,
+    ...sessionGroup.topics.map((topic) => getTopicLastTimestamp(topic, sessionGroup)),
   ]);
-};
 
 const getAssistantFirstTimestamp = (group: AgentGroup) => {
   const agent = group.agent as { createdAt?: string | null; updatedAt?: string | null } | undefined;
@@ -325,71 +322,13 @@ const findPageInDatabase = async (
   return response.results?.[0];
 };
 
-const getAllChildBlocks = async (
-  client: NotionRequester,
-  blockId: string,
-  assertNotCancelled?: CancellationGuard,
-) => {
-  const blocks: Array<{ id: string }> = [];
-  let cursor: string | undefined;
-  do {
-    assertNotCancelled?.();
-    const path = `/blocks/${blockId}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ''}`;
-    const response = await client<{
-      results: Array<{ id: string }>;
-      has_more?: boolean;
-      next_cursor?: string | null;
-    }>(path, { method: 'GET' });
-    assertNotCancelled?.();
-    blocks.push(...response.results);
-    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
-  } while (cursor);
-  return blocks;
-};
-
-const replaceChildren = async (
-  client: NotionRequester,
-  blockId: string,
-  children: any[],
-  assertNotCancelled?: CancellationGuard,
-) => {
-  const existing = await getAllChildBlocks(client, blockId, assertNotCancelled);
-  if (existing.length) {
-    for (const block of existing) {
-      assertNotCancelled?.();
-      await client(`/blocks/${block.id}`, {
-        method: 'PATCH',
-        body: { archived: true },
-      });
-      assertNotCancelled?.();
-      await sleep(200);
-      assertNotCancelled?.();
-    }
-  }
-  if (children.length) {
-    await appendChildren(client, blockId, children, assertNotCancelled);
-  }
-};
-
-const updatePageWithChildren = async (
-  client: NotionRequester,
-  pageId: string,
-  body: Record<string, any>,
-  assertNotCancelled?: CancellationGuard,
-) => {
-  const { children, parent: _parent, ...rest } = body;
-  if (Object.keys(rest).length > 0) {
-    assertNotCancelled?.();
-    await client(`/pages/${pageId}`, {
-      method: 'PATCH',
-      body: rest,
-    });
-    assertNotCancelled?.();
-  }
-  if (Array.isArray(children)) {
-    await replaceChildren(client, pageId, children, assertNotCancelled);
-  }
-  return { id: pageId };
+const archivePage = async (client: NotionRequester, pageId: string, assertNotCancelled?: CancellationGuard) => {
+  assertNotCancelled?.();
+  await client(`/pages/${pageId}`, {
+    method: 'PATCH',
+    body: { archived: true },
+  });
+  assertNotCancelled?.();
 };
 
 const createPageWithChildren = async (
@@ -588,27 +527,37 @@ const exportToDatabases = async (
       assertNotCancelled,
     );
 
+    const previousAssistantId = existingAssistant?.id;
+
     let assistantEntryId: string;
     if (existingAssistant) {
       const existingUpdatedAt =
         assistantUpdatedProp && existingAssistant.properties
           ? existingAssistant.properties[assistantUpdatedProp]?.date?.start ?? undefined
           : undefined;
-      if (assistantUpdatedProp && assistantUpdatedAt && existingUpdatedAt === assistantUpdatedAt) {
+      const assistantUpToDate = Boolean(
+        assistantUpdatedProp && assistantUpdatedAt && existingUpdatedAt === assistantUpdatedAt,
+      );
+
+      if (assistantUpToDate) {
         emit(`Assistant up-to-date: ${assistantLabel}`);
         assistantEntryId = existingAssistant.id;
       } else {
-        emit(`Updating assistant record: ${assistantLabel}`);
-        await updatePageWithChildren(
+        emit(`Refreshing assistant record: ${assistantLabel}`);
+        await archivePage(client, existingAssistant.id, assertNotCancelled);
+        assertNotCancelled();
+        await sleep(200);
+        assertNotCancelled();
+        const assistantEntry = await createPageWithChildren(
           client,
-          existingAssistant.id,
           {
+            parent: { database_id: assistantDb.id },
             icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
             properties: assistantProperties,
           },
           assertNotCancelled,
         );
-        assistantEntryId = existingAssistant.id;
+        assistantEntryId = assistantEntry.id;
         assertNotCancelled();
         await sleep(200);
         assertNotCancelled();
@@ -671,21 +620,44 @@ const exportToDatabases = async (
         }
 
         const children = markdownToBlocks(markdown);
+        const defaultTopicFilter = {
+          and: [
+            {
+              property: conversationTitleProp,
+              title: { equals: topicLabel },
+            },
+            {
+              property: relationProp,
+              relation: { contains: assistantEntryId },
+            },
+          ],
+        };
+
+        const topicFilter =
+          previousAssistantId && previousAssistantId !== assistantEntryId
+            ? {
+                or: [
+                  defaultTopicFilter,
+                  {
+                    and: [
+                      {
+                        property: conversationTitleProp,
+                        title: { equals: topicLabel },
+                      },
+                      {
+                        property: relationProp,
+                        relation: { contains: previousAssistantId },
+                      },
+                    ],
+                  },
+                ],
+              }
+            : defaultTopicFilter;
+
         const existingTopic = await findPageInDatabase(
           client,
           conversationDb.id,
-          {
-            and: [
-              {
-                property: conversationTitleProp,
-                title: { equals: topicLabel },
-              },
-              {
-                property: relationProp,
-                relation: { contains: assistantEntryId },
-              },
-            ],
-          },
+          topicFilter,
           assertNotCancelled,
         );
 
@@ -694,34 +666,34 @@ const exportToDatabases = async (
             conversationUpdatedProp && existingTopic.properties
               ? existingTopic.properties[conversationUpdatedProp]?.date?.start ?? undefined
               : undefined;
-          if (conversationUpdatedProp && topicUpdatedAt && existingUpdatedAt === topicUpdatedAt) {
+          const relationIds: string[] = existingTopic.properties?.[relationProp]?.relation?.map(
+            (item: any) => item.id,
+          );
+          const relationMatchesCurrent = relationIds?.includes(assistantEntryId) ?? false;
+
+          if (conversationUpdatedProp && topicUpdatedAt && existingUpdatedAt === topicUpdatedAt && relationMatchesCurrent) {
             emit(`  -> Skipping topic record (no changes): ${topicLabel}`);
             continue;
           }
-          emit(`  -> Updating topic record: ${topicLabel}`);
-          await updatePageWithChildren(
-            client,
-            existingTopic.id,
-            {
-              icon: { type: 'emoji', emoji: TOPIC_EMOJI },
-              properties,
-              children,
-            },
-            assertNotCancelled,
-          );
-        } else {
-          emit(`  -> Creating topic record: ${topicLabel}`);
-          await createPageWithChildren(
-            client,
-            {
-              parent: { database_id: conversationDb.id },
-              icon: { type: 'emoji', emoji: TOPIC_EMOJI },
-              properties,
-              children,
-            },
-            assertNotCancelled,
-          );
+
+          emit(`  -> Refreshing topic record: ${topicLabel}`);
+          await archivePage(client, existingTopic.id, assertNotCancelled);
+          assertNotCancelled();
+          await sleep(200);
+          assertNotCancelled();
         }
+
+        emit(`  -> Creating topic record: ${topicLabel}`);
+        await createPageWithChildren(
+          client,
+          {
+            parent: { database_id: conversationDb.id },
+            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
+            properties,
+            children,
+          },
+          assertNotCancelled,
+        );
         assertNotCancelled();
         await sleep(200);
         assertNotCancelled();
