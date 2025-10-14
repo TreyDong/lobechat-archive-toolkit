@@ -6,7 +6,7 @@ import { useAppStore } from '../stores/useAppStore';
 
 export const ExportPanel = () => {
   const parsed = useAppStore((state) => state.parsed);
-  const isExporting = useAppStore((state) => state.isExporting);
+  const exportingMode = useAppStore((state) => state.exportingMode);
   const setExporting = useAppStore((state) => state.setExporting);
   const shouldStopExport = useAppStore((state) => state.shouldStopExport);
   const requestExportStop = useAppStore((state) => state.requestExportStop);
@@ -18,10 +18,13 @@ export const ExportPanel = () => {
   const [conversationDatabaseId, setConversationDatabaseId] = useState('');
   const [notionProxyUrl, setNotionProxyUrl] = useState('');
   const [isNotionExportRunning, setNotionExportRunning] = useState(false);
+  const isBusy = exportingMode !== 'none';
+  const isMarkdownExporting = exportingMode === 'markdown';
+  const isNotionExporting = exportingMode === 'notion';
 
   const handleMarkdownExport = async () => {
     if (!parsed) return;
-    setExporting(true);
+    setExporting(true, 'markdown');
     resetExportStop();
     appendLog('开始生成 Markdown 压缩包…', 'info');
     try {
@@ -42,7 +45,7 @@ export const ExportPanel = () => {
       return;
     }
     const useDatabase = assistantDatabaseId.trim() && conversationDatabaseId.trim();
-    setExporting(true);
+    setExporting(true, 'notion');
     setNotionExportRunning(true);
     resetExportStop();
     appendLog(useDatabase ? '开始同步到 Notion 数据库…' : '开始在 Notion 创建页面…', 'info');
@@ -90,10 +93,10 @@ export const ExportPanel = () => {
         <button
           type="button"
           onClick={handleMarkdownExport}
-          disabled={isExporting}
+          disabled={isBusy}
           className="inline-flex items-center justify-center rounded-full bg-indigo-500 px-6 py-3 text-sm font-medium text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-slate-700"
         >
-          {isExporting ? '生成中…' : '下载 Markdown ZIP'}
+          {isMarkdownExporting ? '生成中…' : '下载 Markdown ZIP'}
         </button>
       </div>
 
@@ -135,12 +138,12 @@ export const ExportPanel = () => {
           <button
             type="button"
             onClick={handleNotionExport}
-            disabled={isExporting}
+            disabled={isBusy}
             className="rounded-full border border-slate-700/60 px-5 py-2 text-sm text-slate-200 transition hover:border-slate-500/70 hover:text-white disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
           >
-            {isExporting ? '同步中…' : '同步到 Notion'}
+            {isNotionExporting ? '同步中…' : '同步到 Notion'}
           </button>
-          {isNotionExportRunning && (
+          {(isNotionExportRunning || isNotionExporting) && (
             <button
               type="button"
               onClick={() => {

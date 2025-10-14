@@ -16,12 +16,13 @@ interface AppState {
   parsed?: ParsedData;
   isParsing: boolean;
   isExporting: boolean;
+  exportingMode: 'none' | 'markdown' | 'notion';
   shouldStopExport: boolean;
   logs: LogEntry[];
   setSourceFile: (file: File | undefined) => void;
   setParsedData: (data: ParsedData | undefined) => void;
   setParsing: (value: boolean) => void;
-  setExporting: (value: boolean) => void;
+  setExporting: (value: boolean, mode?: 'markdown' | 'notion') => void;
   requestExportStop: () => void;
   resetExportStop: () => void;
   appendLog: (message: string, level?: LogLevel) => void;
@@ -33,12 +34,17 @@ export const useAppStore = create<AppState>((set) => ({
   parsed: undefined,
   isParsing: false,
   isExporting: false,
+  exportingMode: 'none',
   shouldStopExport: false,
   logs: [],
   setSourceFile: (file) => set({ sourceFile: file }),
   setParsedData: (data) => set({ parsed: data }),
   setParsing: (value) => set({ isParsing: value }),
-  setExporting: (value) => set({ isExporting: value }),
+  setExporting: (value, mode) =>
+    set({
+      isExporting: value,
+      exportingMode: value ? mode ?? 'none' : 'none',
+    }),
   requestExportStop: () => set({ shouldStopExport: true }),
   resetExportStop: () => set({ shouldStopExport: false }),
   appendLog: (message, level = 'info') =>
@@ -60,6 +66,7 @@ export const useAppStore = create<AppState>((set) => ({
       logs: [],
       isParsing: false,
       isExporting: false,
+      exportingMode: 'none',
       shouldStopExport: false,
     }),
 }));
