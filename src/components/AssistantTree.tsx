@@ -35,7 +35,21 @@ export const AssistantTree = () => {
 
       <div className="space-y-5">
         {sortedGroups.map((group) => {
-          const agentLabel = group.agentLabel?.trim() || '默认助手';
+          const agentTitle = group.agent?.title?.trim() ?? '';
+          const agentExtra = group.agent as Record<string, unknown> | undefined;
+          const rawClientId = agentExtra?.clientId ?? agentExtra?.client_id ?? '';
+          const clientIdValue =
+            typeof rawClientId === 'string'
+              ? rawClientId.trim()
+              : typeof rawClientId === 'number'
+                ? String(rawClientId)
+                : '';
+          const isDefaultAgent = !agentTitle && !clientIdValue;
+          const agentLabel =
+            (isDefaultAgent ? '默认助手' : group.agentLabel?.trim()) ||
+            agentTitle ||
+            group.agent?.slug?.trim() ||
+            '未命名助手';
           const topics = group.sessions
             .flatMap((session) =>
               session.topics.map((topic) => {

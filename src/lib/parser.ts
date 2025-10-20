@@ -331,9 +331,18 @@ export const parseLobeChatJson = (
   const groupedByAgent: Record<string, SessionGroup[]> = {};
   const agentLabels: Record<string, string> = {};
   const assignedTopicIds = new Set<string>();
-  const defaultAgent = Object.values(agents).find(
-    (agent) => agent && isNullOrWhitespace(agent.title) && isNullOrWhitespace(agent.clientId),
-  );
+  const defaultAgent = Object.values(agents).find((agent) => {
+    if (!agent) return false;
+    const rawClientId = (agent as Record<string, unknown>).clientId ?? (agent as Record<string, unknown>).client_id ?? '';
+    const clientIdValue =
+      typeof rawClientId === 'string'
+        ? rawClientId.trim()
+        : typeof rawClientId === 'number'
+          ? String(rawClientId)
+          : '';
+    const titleValue = agent.title?.trim() ?? '';
+    return !titleValue && !clientIdValue;
+  });
   const defaultAgentId = defaultAgent?.id;
 
   for (const { agentId, sessionId } of agentsToSessions) {
@@ -540,7 +549,21 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
   const usedAgentDirNames = new Set<string>();
 
   for (const group of parsed.groups) {
-    const agentLabel = group.agentLabel?.trim() || '默认助手';
+    const agentExtra = group.agent as Record<string, unknown> | undefined;
+    const rawClientId = agentExtra?.clientId ?? agentExtra?.client_id ?? '';
+    const clientIdValue =
+      typeof rawClientId === 'string'
+        ? rawClientId.trim()
+        : typeof rawClientId === 'number'
+          ? String(rawClientId)
+          : '';
+    const agentTitle = group.agent?.title?.trim() ?? '';
+    const isDefaultAgent = !agentTitle && !clientIdValue;
+    const agentLabel =
+      (isDefaultAgent ? '默认助手' : group.agentLabel?.trim()) ||
+      agentTitle ||
+      group.agent?.slug?.trim() ||
+      '未命名助手';
     const agentDirBase = safeFilename(agentLabel, group.agentId);
     const agentDirName = ensureUniqueName(agentDirBase, usedAgentDirNames);
     const agent = group.agent;
