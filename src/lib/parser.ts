@@ -3,6 +3,7 @@ export type LobeRole = 'assistant' | 'user' | 'tool' | (string & {});
 export interface LobeAgent {
   id: string;
   title?: string | null;
+  clientId?: string | null;
   slug?: string | null;
   description?: string | null;
   systemRole?: string | null;
@@ -24,6 +25,8 @@ export interface LobeTopic {
   id: string;
   title?: string | null;
   sessionId?: string | null;
+  groupId?: string | null;
+  clientId?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 }
@@ -132,6 +135,8 @@ const bestMessageSnippet = (messages: LobeMessage[]): string | undefined => {
   }
   return undefined;
 };
+
+const isNullOrWhitespace = (value?: string | null) => !value || value.trim().length === 0;
 
 const deriveAgentLabel = (agent: LobeAgent | undefined, session: LobeSession | undefined) => {
   const candidates = [
@@ -325,6 +330,11 @@ export const parseLobeChatJson = (
   const agentsToSessions = payload.agentsToSessions ?? [];
   const groupedByAgent: Record<string, SessionGroup[]> = {};
   const agentLabels: Record<string, string> = {};
+  const assignedTopicIds = new Set<string>();
+  const defaultAgent = Object.values(agents).find(
+    (agent) => agent && isNullOrWhitespace(agent.title) && isNullOrWhitespace(agent.clientId),
+  );
+  const defaultAgentId = defaultAgent?.id;
 
   for (const { agentId, sessionId } of agentsToSessions) {
     if (!agentId || !sessionId) continue;
@@ -352,6 +362,9 @@ export const parseLobeChatJson = (
       session,
       topics: topicOrder.map((topicId) => topicsMap[topicId]),
     });
+    for (const topicId of topicOrder) {
+      assignedTopicIds.add(topicId);
+    }
 
     const agentLabel = deriveAgentLabel(agents[agentId], session);
     agentLabels[agentId] = agentLabel;
@@ -388,7 +401,43 @@ export const parseLobeChatJson = (
       session,
       topics: topicOrder.map((topicId) => topicsMap[topicId]),
     });
+    for (const topicId of topicOrder) {
+      assignedTopicIds.add(topicId);
+    }
     agentLabels[fallbackAgentId] = session?.title ?? session?.slug ?? '未分配助手';
+  }
+
+  if (defaultAgentId) {
+    const defaultSessions = groupedByAgent[defaultAgentId] ?? [];
+    const defaultSessionMap = new Map(defaultSessions.map((sessionGroup) => [sessionGroup.sessionId, sessionGroup]));
+
+    for (const [topicId, topicGroup] of Object.entries(topicGroups)) {
+      if (assignedTopicIds.has(topicId)) continue;
+      const topic = topics[topicId];
+      const hasIdentifiers =
+        Boolean(topic?.sessionId) || Boolean(topic?.groupId) || Boolean(topic?.clientId);
+      if (hasIdentifiers) continue;
+
+      const pseudoSessionId = `__default_topic_${topicId}`;
+      let sessionGroup = defaultSessionMap.get(pseudoSessionId);
+      if (!sessionGroup) {
+        sessionGroup = {
+          sessionId: pseudoSessionId,
+          sessionLabel: topicGroup.topicLabel,
+          session: undefined,
+          topics: [],
+        };
+        defaultSessions.push(sessionGroup);
+        defaultSessionMap.set(pseudoSessionId, sessionGroup);
+      }
+      sessionGroup.topics.push(topicGroup);
+      assignedTopicIds.add(topicId);
+    }
+
+    if (defaultSessions.length) {
+      groupedByAgent[defaultAgentId] = defaultSessions;
+    }
+    agentLabels[defaultAgentId] = defaultAgent?.title?.trim() || '默认助手';
   }
 
   const groups: AgentGroup[] = Object.entries(groupedByAgent).map(([agentId, sessionGroups]) => {
