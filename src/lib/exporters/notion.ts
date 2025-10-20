@@ -28,6 +28,8 @@ const TOPIC_EMOJI = '💬';
 const MAX_NOTION_RETRIES = 4;
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
+const normalizeAssistantKey = (label: string) => label.trim().toLowerCase();
+
 const chunkText = (input: string, maxLength = 1800): string[] => {
   if (!input) return [''];
   const chunks: string[] = [];
@@ -200,6 +202,37 @@ const createNotionRequester = (token: string, baseUrl: string): NotionRequester 
   };
 };
 
+const fetchAllDatabasePages = async (
+  client: NotionRequester,
+  databaseId: string,
+  assertNotCancelled?: CancellationGuard,
+) => {
+  const pages: any[] = [];
+  let cursor: string | undefined;
+
+  do {
+    assertNotCancelled?.();
+    const body: Record<string, any> = { page_size: 100 };
+    if (cursor) {
+      body.start_cursor = cursor;
+    }
+
+    const response = await client<{
+      results: any[];
+      has_more: boolean;
+      next_cursor: string | null;
+    }>(`/databases/${databaseId}/query`, {
+      body,
+    });
+    assertNotCancelled?.();
+
+    pages.push(...response.results);
+    cursor = response.has_more && response.next_cursor ? response.next_cursor : undefined;
+  } while (cursor);
+
+  return pages;
+};
+
 const findTitleProperty = (database: any) => {
   const titleEntry = Object.entries(database.properties).find(([, prop]: any) => prop.type === 'title');
   if (!titleEntry) {
@@ -235,6 +268,19 @@ const findRichTextPropertyByName = (database: any, targetName: string) => {
 };
 
 const normalizePropertyName = (input: string) => input.toLowerCase().replace(/\s+/g, '');
+
+const extractTitleFromPage = (page: any, propertyName: string): string | undefined => {
+  const property = page?.properties?.[propertyName];
+  if (!property || property.type !== 'title' || !Array.isArray(property.title)) return undefined;
+  const title = property.title.map((item: any) => item.plain_text ?? '').join('').trim();
+  return title || undefined;
+};
+
+const extractDateFromPage = (page: any, propertyName: string): string | undefined => {
+  const property = page?.properties?.[propertyName];
+  if (!property || property.type !== 'date') return undefined;
+  return property.date?.start ?? undefined;
+};
 
 const findDatePropertyByNames = (database: any, targetNames: string[]) => {
   const normalizedTargets = targetNames.map(normalizePropertyName);
@@ -566,10 +612,34 @@ const exportToDatabases = async (
     errors.push(details);
   };
 
+  const assistantPages = await fetchAllDatabasePages(client, assistantDb.id, assertNotCancelled);
+  const assistantIndex = new Map<
+    string,
+    {
+      id: string;
+      title: string;
+      updatedAt?: string;
+      lastEditedAt?: string;
+    }
+  >();
+  for (const page of assistantPages) {
+    if (!page || page.archived) continue;
+    const title = extractTitleFromPage(page, assistantTitleProp);
+    if (!title) continue;
+    const key = normalizeAssistantKey(title);
+    assistantIndex.set(key, {
+      id: page.id,
+      title,
+      updatedAt: assistantUpdatedProp ? extractDateFromPage(page, assistantUpdatedProp) : undefined,
+      lastEditedAt: typeof page.last_edited_time === 'string' ? page.last_edited_time : undefined,
+    });
+  }
+
   for (const group of groups) {
     assertNotCancelled();
     try {
       const assistantLabel = group.agentLabel;
+      const assistantKey = normalizeAssistantKey(assistantLabel);
       const assistantCreatedAt = getAssistantFirstTimestamp(group);
       const assistantUpdatedAt = getAssistantLastTimestamp(group);
       const assistantProperties: Record<string, any> = {
@@ -598,69 +668,55 @@ const exportToDatabases = async (
         };
       }
 
-      const existingAssistant = await findPageInDatabase(
-        client,
-        assistantDb.id,
-        {
-          property: assistantTitleProp,
-          title: { equals: assistantLabel },
-        },
-        assertNotCancelled,
-      );
+      const existingAssistant = assistantIndex.get(assistantKey);
+      const existingTimestamp = existingAssistant
+        ? parseDateInput(existingAssistant.updatedAt ?? existingAssistant.lastEditedAt ?? undefined)
+        : undefined;
+      const jsonTimestamp = assistantUpdatedAt ? parseDateInput(assistantUpdatedAt) : undefined;
+      const nameMatches =
+        existingAssistant && existingAssistant.title.trim() === assistantLabel.trim();
+      const jsonIsNewer =
+        Boolean(jsonTimestamp) &&
+        (!existingTimestamp || (jsonTimestamp && jsonTimestamp.getTime() > existingTimestamp.getTime()));
 
-      const previousAssistantId = existingAssistant?.id;
+      if (existingAssistant && nameMatches && !jsonIsNewer) {
+        emit(`Assistant up-to-date: ${assistantLabel}`);
+        assistantSyncResults.push({ group, assistantEntryId: existingAssistant.id });
+        continue;
+      }
 
-      let assistantEntryId: string;
+      let previousAssistantId: string | undefined;
       if (existingAssistant) {
-        const existingUpdatedAt =
-          assistantUpdatedProp && existingAssistant.properties
-            ? existingAssistant.properties[assistantUpdatedProp]?.date?.start ?? undefined
-            : undefined;
-        const assistantUpToDate = Boolean(
-          assistantUpdatedProp && assistantUpdatedAt && existingUpdatedAt === assistantUpdatedAt,
-        );
-
-        if (assistantUpToDate) {
-          emit(`Assistant up-to-date: ${assistantLabel}`);
-          assistantEntryId = existingAssistant.id;
-        } else {
-          emit(`Refreshing assistant record: ${assistantLabel}`);
-          await archivePage(client, existingAssistant.id, assertNotCancelled);
-          assertNotCancelled();
-          await sleep(200);
-          assertNotCancelled();
-          const assistantEntry = await createPageWithChildren(
-            client,
-            {
-              parent: { database_id: assistantDb.id },
-              icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-              properties: assistantProperties,
-            },
-            assertNotCancelled,
-          );
-          assistantEntryId = assistantEntry.id;
-          assertNotCancelled();
-          await sleep(200);
-          assertNotCancelled();
-        }
-      } else {
-        emit(`Creating assistant record: ${assistantLabel}`);
-        const assistantEntry = await createPageWithChildren(
-          client,
-          {
-            parent: { database_id: assistantDb.id },
-            icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-            properties: assistantProperties,
-          },
-          assertNotCancelled,
-        );
-        assistantEntryId = assistantEntry.id;
+        previousAssistantId = existingAssistant.id;
+        emit(`Refreshing assistant record: ${assistantLabel}`);
+        await archivePage(client, existingAssistant.id, assertNotCancelled);
         assertNotCancelled();
         await sleep(200);
         assertNotCancelled();
+      } else {
+        emit(`Creating assistant record: ${assistantLabel}`);
       }
 
+      const assistantEntry = await createPageWithChildren(
+        client,
+        {
+          parent: { database_id: assistantDb.id },
+          icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+          properties: assistantProperties,
+        },
+        assertNotCancelled,
+      );
+      const assistantEntryId = assistantEntry.id;
+      assistantIndex.set(assistantKey, {
+        id: assistantEntryId,
+        title: assistantLabel,
+        updatedAt: assistantUpdatedAt,
+        lastEditedAt: assistantUpdatedAt ?? new Date().toISOString(),
+      });
       assistantSyncResults.push({ group, assistantEntryId, previousAssistantId });
+      assertNotCancelled();
+      await sleep(200);
+      assertNotCancelled();
     } catch (error) {
       recordError(`助手 ${group.agentLabel} 同步失败`, error);
     }
