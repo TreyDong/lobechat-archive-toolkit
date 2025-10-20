@@ -35,6 +35,7 @@ export const AssistantTree = () => {
 
       <div className="space-y-5">
         {sortedGroups.map((group) => {
+          const agentLabel = group.agentLabel?.trim() || '默认助手';
           const topics = group.sessions
             .flatMap((session) =>
               session.topics.map((topic) => {
@@ -62,7 +63,7 @@ export const AssistantTree = () => {
           return (
             <div key={group.agentId} className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-4">
               <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
-                <h3 className="text-base font-semibold text-indigo-100">{group.agentLabel}</h3>
+                <h3 className="text-base font-semibold text-indigo-100">{agentLabel}</h3>
                 <p className="text-xs text-slate-400">{topicCount} 个话题</p>
               </div>
 

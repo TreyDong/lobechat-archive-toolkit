@@ -540,7 +540,8 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
   const usedAgentDirNames = new Set<string>();
 
   for (const group of parsed.groups) {
-    const agentDirBase = safeFilename(group.agentLabel, group.agentId);
+    const agentLabel = group.agentLabel?.trim() || '默认助手';
+    const agentDirBase = safeFilename(agentLabel, group.agentId);
     const agentDirName = ensureUniqueName(agentDirBase, usedAgentDirNames);
     const agent = group.agent;
     const sessionCount = group.sessions.length;
@@ -558,7 +559,7 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
       Model: agent?.model ?? null,
       Provider: agent?.provider ?? null,
     };
-    const readmeLines: string[] = [`# ${group.agentLabel}`, ''];
+    const readmeLines: string[] = [`# ${agentLabel}`, ''];
     readmeLines.push(...formatMetadataBlock('Assistant Overview', overviewMeta));
     if (group.sessions.length) {
       readmeLines.push('## Sessions', '');
@@ -584,9 +585,7 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
       path: readmePath,
       content: `${readmeLines.join('\n').trimEnd()}\n`,
     });
-    indexLines.push(
-      `- [${group.agentLabel}](${readmePath}) - ${sessionCount} sessions, ${topicCount} topics, ${messageCount} messages`,
-    );
+    indexLines.push(`- [${agentLabel}](${readmePath}) - ${sessionCount} sessions, ${topicCount} topics, ${messageCount} messages`);
     const usedTopicNames = new Set<string>();
 
     for (const sessionGroup of group.sessions) {
@@ -599,10 +598,10 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
         const path = `${agentDirName}/${topicFileName}.md`;
         files.push({
           path,
-          content: buildMarkdownForTopic(agent, sessionGroup.session, topicGroup, group.agentLabel),
+          content: buildMarkdownForTopic(agent, sessionGroup.session, topicGroup, agentLabel),
         });
         indexLines.push(
-          `- [${group.agentLabel} / ${topicGroup.topicLabel}](${path}) - ${topicGroup.messages.length} messages (session: ${sessionGroup.sessionLabel})`,
+          `- [${agentLabel} / ${topicGroup.topicLabel}](${path}) - ${topicGroup.messages.length} messages (session: ${sessionGroup.sessionLabel})`,
         );
       }
     }
