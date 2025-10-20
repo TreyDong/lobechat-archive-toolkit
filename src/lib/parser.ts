@@ -494,6 +494,50 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
     const agentDirBase = safeFilename(group.agentLabel, group.agentId);
     const agentDirName = ensureUniqueName(agentDirBase, usedAgentDirNames);
     const agent = group.agent;
+    const sessionCount = group.sessions.length;
+    const topicCount = group.sessions.reduce((total, sessionGroup) => total + sessionGroup.topics.length, 0);
+    const messageCount = group.sessions.reduce(
+      (total, sessionGroup) =>
+        total + sessionGroup.topics.reduce((sum, topicGroup) => sum + topicGroup.messages.length, 0),
+      0,
+    );
+    const overviewMeta = {
+      'Assistant ID': agent?.id ?? group.agentId,
+      'Session Count': String(sessionCount),
+      'Topic Count': String(topicCount),
+      'Message Count': String(messageCount),
+      Model: agent?.model ?? null,
+      Provider: agent?.provider ?? null,
+    };
+    const readmeLines: string[] = [`# ${group.agentLabel}`, ''];
+    readmeLines.push(...formatMetadataBlock('Assistant Overview', overviewMeta));
+    if (group.sessions.length) {
+      readmeLines.push('## Sessions', '');
+      for (const sessionGroup of group.sessions) {
+        const sessionMessageCount = sessionGroup.topics.reduce(
+          (count, topicGroup) => count + topicGroup.messages.length,
+          0,
+        );
+        readmeLines.push(
+          `- ${sessionGroup.sessionLabel} (${sessionGroup.topics.length} topics, ${sessionMessageCount} messages)`,
+        );
+      }
+      readmeLines.push('');
+    } else {
+      readmeLines.push('_暂无关联会话。_', '');
+    }
+    if (agent?.systemRole) {
+      readmeLines.push('## System Prompt', '');
+      readmeLines.push('```', agent.systemRole, '```', '');
+    }
+    const readmePath = `${agentDirName}/README.md`;
+    files.push({
+      path: readmePath,
+      content: `${readmeLines.join('\n').trimEnd()}\n`,
+    });
+    indexLines.push(
+      `- [${group.agentLabel}](${readmePath}) - ${sessionCount} sessions, ${topicCount} topics, ${messageCount} messages`,
+    );
     const usedTopicNames = new Set<string>();
 
     for (const sessionGroup of group.sessions) {

@@ -25,6 +25,8 @@ const NOTION_VERSION = '2022-06-28';
 const NOTION_CHILD_LIMIT = 100;
 const ASSISTANT_EMOJI = '🤖';
 const TOPIC_EMOJI = '💬';
+const MAX_NOTION_RETRIES = 4;
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 const chunkText = (input: string, maxLength = 1800): string[] => {
   if (!input) return [''];
@@ -128,6 +130,9 @@ const createCancellationGuard = (
   };
 };
 
+const isCancellationError = (error: unknown) =>
+  error instanceof Error && error.message.includes('停止 Notion 导出');
+
 const markdownToBlocks = (markdown: string) => martianMarkdownToBlocks(markdown);
 
 const toRichText = (text: string) =>
@@ -140,28 +145,58 @@ const createNotionRequester = (token: string, baseUrl: string): NotionRequester 
   const normalizedBase = baseUrl.replace(/\/+$/, '');
 
   return async <T>(path: string, init?: NotionRequestInit): Promise<T> => {
-    const response = await fetch(`${normalizedBase}${path}`, {
-      method: init?.method ?? 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Notion-Version': NOTION_VERSION,
-        ...init?.headers,
-      },
-      body: init?.body ? JSON.stringify(init.body) : undefined,
-      mode: 'cors',
-    });
+    let lastError: Error | undefined;
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Notion API error ${response.status}: ${text}`);
+    for (let attempt = 0; attempt < MAX_NOTION_RETRIES; attempt += 1) {
+      try {
+        const response = await fetch(`${normalizedBase}${path}`, {
+          method: init?.method ?? 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'Notion-Version': NOTION_VERSION,
+            ...init?.headers,
+          },
+          body: init?.body ? JSON.stringify(init.body) : undefined,
+          mode: 'cors',
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          const shouldRetry = RETRYABLE_STATUS.has(response.status);
+          if (shouldRetry && attempt < MAX_NOTION_RETRIES - 1) {
+            const retryAfterHeader = response.headers.get('retry-after');
+            const retryAfterSeconds = retryAfterHeader ? Number.parseFloat(retryAfterHeader) : NaN;
+            const backoffDelay = Math.min(5000, 500 * 2 ** attempt);
+            const retryDelay = Number.isFinite(retryAfterSeconds)
+              ? Math.max(backoffDelay, retryAfterSeconds * 1000)
+              : backoffDelay;
+            await sleep(retryDelay);
+            continue;
+          }
+          throw new Error(`Notion API error ${response.status}: ${text}`);
+        }
+
+        if (response.status === 204) {
+          return undefined as T;
+        }
+
+        return (await response.json()) as T;
+      } catch (error) {
+        if (isCancellationError(error)) {
+          throw error;
+        }
+
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < MAX_NOTION_RETRIES - 1) {
+          await sleep(Math.min(5000, 500 * 2 ** attempt));
+          continue;
+        }
+        break;
+      }
     }
 
-    if (response.status === 204) {
-      return undefined as T;
-    }
-
-    return (await response.json()) as T;
+    throw lastError ?? new Error('Unknown Notion API error');
   };
 };
 
@@ -367,63 +402,92 @@ const exportAsPages = async (
     if (log) log(message, level);
   };
   const assertNotCancelled = createCancellationGuard(shouldStop, emit);
+  const errors: string[] = [];
+  const recordError = (scope: string, error: unknown) => {
+    if (isCancellationError(error)) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const details = `${scope}：${message}`;
+    emit(details, 'error');
+    errors.push(details);
+  };
 
   for (const group of groups) {
     assertNotCancelled();
-    emit(`Creating assistant page: ${group.agentLabel}`);
-    const assistantPage = await createPageWithChildren(
-      client,
-      {
-        parent: { type: 'workspace', workspace: true },
-        icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-        properties: {
-          title: {
-            title: [
-              {
-                type: 'text',
-                text: { content: group.agentLabel },
-              },
-            ],
+    let assistantPage: { id: string } | undefined;
+    try {
+      emit(`Creating assistant page: ${group.agentLabel}`);
+      assistantPage = await createPageWithChildren(
+        client,
+        {
+          parent: { type: 'workspace', workspace: true },
+          icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+          properties: {
+            title: {
+              title: [
+                {
+                  type: 'text',
+                  text: { content: group.agentLabel },
+                },
+              ],
+            },
           },
         },
-      },
-      assertNotCancelled,
-    );
-    assertNotCancelled();
+        assertNotCancelled,
+      );
+      assertNotCancelled();
+    } catch (error) {
+      recordError(`助手 ${group.agentLabel} 创建失败`, error);
+      continue;
+    }
 
     for (const session of group.sessions) {
       assertNotCancelled();
       for (const topic of session.topics) {
         assertNotCancelled();
-        const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel, {
-          includeMetadata: false,
-          includeSystemPrompt: false,
-        });
-        emit(`  -> Creating topic page: ${topic.topicLabel}`);
-        await createPageWithChildren(
-          client,
-          {
-            parent: { page_id: assistantPage.id },
-            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
-            properties: {
-              title: {
-                title: [
-                  {
-                    type: 'text',
-                    text: { content: topic.topicLabel },
-                  },
-                ],
+        const topicLabel = topic.topicLabel;
+        try {
+          const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel, {
+            includeMetadata: false,
+            includeSystemPrompt: false,
+          });
+          emit(`  -> Creating topic page: ${topicLabel}`);
+          await createPageWithChildren(
+            client,
+            {
+              parent: { page_id: assistantPage.id },
+              icon: { type: 'emoji', emoji: TOPIC_EMOJI },
+              properties: {
+                title: {
+                  title: [
+                    {
+                      type: 'text',
+                      text: { content: topicLabel },
+                    },
+                  ],
+                },
               },
+              children: markdownToBlocks(markdown),
             },
-            children: markdownToBlocks(markdown),
-          },
-          assertNotCancelled,
-        );
-        assertNotCancelled();
-        await sleep(200);
-        assertNotCancelled();
+            assertNotCancelled,
+          );
+          assertNotCancelled();
+          await sleep(200);
+          assertNotCancelled();
+        } catch (error) {
+          recordError(`助手 ${group.agentLabel} 的主题 ${topicLabel} 导出失败`, error);
+        }
       }
     }
+  }
+
+  if (errors.length) {
+    const summary = [
+      `Notion 导出完成，但存在 ${errors.length} 个错误：`,
+      ...errors.map((item, index) => `${index + 1}. ${item}`),
+    ].join('\n');
+    throw new Error(summary);
   }
 };
 
@@ -486,68 +550,101 @@ const exportToDatabases = async (
     '更新时间',
   ]);
 
+  const assistantSyncResults: Array<{
+    group: AgentGroup;
+    assistantEntryId: string;
+    previousAssistantId?: string;
+  }> = [];
+  const errors: string[] = [];
+  const recordError = (scope: string, error: unknown) => {
+    if (isCancellationError(error)) {
+      throw (error instanceof Error ? error : new Error(String(error)));
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const details = `${scope}：${message}`;
+    emit(details, 'error');
+    errors.push(details);
+  };
+
   for (const group of groups) {
     assertNotCancelled();
-    const assistantLabel = group.agentLabel;
-    const assistantCreatedAt = getAssistantFirstTimestamp(group);
-    const assistantUpdatedAt = getAssistantLastTimestamp(group);
-    const assistantProperties: Record<string, any> = {
-      [assistantTitleProp]: {
-        title: [
-          {
-            type: 'text',
-            text: { content: assistantLabel },
-          },
-        ],
-      },
-    };
-    if (promptProp && group.agent?.systemRole) {
-      assistantProperties[promptProp] = {
-        rich_text: toRichText(group.agent.systemRole),
+    try {
+      const assistantLabel = group.agentLabel;
+      const assistantCreatedAt = getAssistantFirstTimestamp(group);
+      const assistantUpdatedAt = getAssistantLastTimestamp(group);
+      const assistantProperties: Record<string, any> = {
+        [assistantTitleProp]: {
+          title: [
+            {
+              type: 'text',
+              text: { content: assistantLabel },
+            },
+          ],
+        },
       };
-    }
-    if (assistantCreatedProp && assistantCreatedAt) {
-      assistantProperties[assistantCreatedProp] = {
-        date: { start: assistantCreatedAt },
-      };
-    }
-    if (assistantUpdatedProp && assistantUpdatedAt) {
-      assistantProperties[assistantUpdatedProp] = {
-        date: { start: assistantUpdatedAt },
-      };
-    }
+      if (promptProp && group.agent?.systemRole) {
+        assistantProperties[promptProp] = {
+          rich_text: toRichText(group.agent.systemRole),
+        };
+      }
+      if (assistantCreatedProp && assistantCreatedAt) {
+        assistantProperties[assistantCreatedProp] = {
+          date: { start: assistantCreatedAt },
+        };
+      }
+      if (assistantUpdatedProp && assistantUpdatedAt) {
+        assistantProperties[assistantUpdatedProp] = {
+          date: { start: assistantUpdatedAt },
+        };
+      }
 
-    const existingAssistant = await findPageInDatabase(
-      client,
-      assistantDb.id,
-      {
-        property: assistantTitleProp,
-        title: { equals: assistantLabel },
-      },
-      assertNotCancelled,
-    );
-
-    const previousAssistantId = existingAssistant?.id;
-
-    let assistantEntryId: string;
-    if (existingAssistant) {
-      const existingUpdatedAt =
-        assistantUpdatedProp && existingAssistant.properties
-          ? existingAssistant.properties[assistantUpdatedProp]?.date?.start ?? undefined
-          : undefined;
-      const assistantUpToDate = Boolean(
-        assistantUpdatedProp && assistantUpdatedAt && existingUpdatedAt === assistantUpdatedAt,
+      const existingAssistant = await findPageInDatabase(
+        client,
+        assistantDb.id,
+        {
+          property: assistantTitleProp,
+          title: { equals: assistantLabel },
+        },
+        assertNotCancelled,
       );
 
-      if (assistantUpToDate) {
-        emit(`Assistant up-to-date: ${assistantLabel}`);
-        assistantEntryId = existingAssistant.id;
+      const previousAssistantId = existingAssistant?.id;
+
+      let assistantEntryId: string;
+      if (existingAssistant) {
+        const existingUpdatedAt =
+          assistantUpdatedProp && existingAssistant.properties
+            ? existingAssistant.properties[assistantUpdatedProp]?.date?.start ?? undefined
+            : undefined;
+        const assistantUpToDate = Boolean(
+          assistantUpdatedProp && assistantUpdatedAt && existingUpdatedAt === assistantUpdatedAt,
+        );
+
+        if (assistantUpToDate) {
+          emit(`Assistant up-to-date: ${assistantLabel}`);
+          assistantEntryId = existingAssistant.id;
+        } else {
+          emit(`Refreshing assistant record: ${assistantLabel}`);
+          await archivePage(client, existingAssistant.id, assertNotCancelled);
+          assertNotCancelled();
+          await sleep(200);
+          assertNotCancelled();
+          const assistantEntry = await createPageWithChildren(
+            client,
+            {
+              parent: { database_id: assistantDb.id },
+              icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
+              properties: assistantProperties,
+            },
+            assertNotCancelled,
+          );
+          assistantEntryId = assistantEntry.id;
+          assertNotCancelled();
+          await sleep(200);
+          assertNotCancelled();
+        }
       } else {
-        emit(`Refreshing assistant record: ${assistantLabel}`);
-        await archivePage(client, existingAssistant.id, assertNotCancelled);
-        assertNotCancelled();
-        await sleep(200);
-        assertNotCancelled();
+        emit(`Creating assistant record: ${assistantLabel}`);
         const assistantEntry = await createPageWithChildren(
           client,
           {
@@ -562,143 +659,147 @@ const exportToDatabases = async (
         await sleep(200);
         assertNotCancelled();
       }
-    } else {
-      emit(`Creating assistant record: ${assistantLabel}`);
-      const assistantEntry = await createPageWithChildren(
-        client,
-        {
-          parent: { database_id: assistantDb.id },
-          icon: { type: 'emoji', emoji: ASSISTANT_EMOJI },
-          properties: assistantProperties,
-        },
-        assertNotCancelled,
-      );
-      assistantEntryId = assistantEntry.id;
-      assertNotCancelled();
-      await sleep(200);
-      assertNotCancelled();
-    }
 
+      assistantSyncResults.push({ group, assistantEntryId, previousAssistantId });
+    } catch (error) {
+      recordError(`助手 ${group.agentLabel} 同步失败`, error);
+    }
+  }
+
+  for (const { group, assistantEntryId, previousAssistantId } of assistantSyncResults) {
+    assertNotCancelled();
     for (const session of group.sessions) {
       assertNotCancelled();
       for (const topic of session.topics) {
         assertNotCancelled();
-        const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel, {
-          includeMetadata: false,
-          includeSystemPrompt: false,
-        });
         const topicLabel = topic.topicLabel;
-        const topicCreatedAt = getTopicFirstTimestamp(topic) ?? getSessionFirstTimestamp(session);
-        const topicUpdatedAt = getTopicLastTimestamp(topic, session);
-        const properties: Record<string, any> = {
-          [conversationTitleProp]: {
-            title: [
-              {
-                type: 'text',
-                text: { content: topicLabel },
-              },
-            ],
-          },
-          [relationProp]: {
-            relation: [{ id: assistantEntryId }],
-          },
-        };
-        if (sessionProp) {
-          properties[sessionProp] = {
-            rich_text: toRichText(session.sessionLabel),
-          };
-        }
-        if (conversationCreatedProp && topicCreatedAt) {
-          properties[conversationCreatedProp] = {
-            date: { start: topicCreatedAt },
-          };
-        }
-        if (conversationUpdatedProp && topicUpdatedAt) {
-          properties[conversationUpdatedProp] = {
-            date: { start: topicUpdatedAt },
-          };
-        }
-
-        const children = markdownToBlocks(markdown);
-        const defaultTopicFilter = {
-          and: [
-            {
-              property: conversationTitleProp,
-              title: { equals: topicLabel },
+        try {
+          const markdown = buildMarkdownForTopic(group.agent, session.session, topic, group.agentLabel, {
+            includeMetadata: false,
+            includeSystemPrompt: false,
+          });
+          const topicCreatedAt = getTopicFirstTimestamp(topic) ?? getSessionFirstTimestamp(session);
+          const topicUpdatedAt = getTopicLastTimestamp(topic, session);
+          const properties: Record<string, any> = {
+            [conversationTitleProp]: {
+              title: [
+                {
+                  type: 'text',
+                  text: { content: topicLabel },
+                },
+              ],
             },
-            {
-              property: relationProp,
-              relation: { contains: assistantEntryId },
+            [relationProp]: {
+              relation: [{ id: assistantEntryId }],
             },
-          ],
-        };
-
-        const topicFilter =
-          previousAssistantId && previousAssistantId !== assistantEntryId
-            ? {
-                or: [
-                  defaultTopicFilter,
-                  {
-                    and: [
-                      {
-                        property: conversationTitleProp,
-                        title: { equals: topicLabel },
-                      },
-                      {
-                        property: relationProp,
-                        relation: { contains: previousAssistantId },
-                      },
-                    ],
-                  },
-                ],
-              }
-            : defaultTopicFilter;
-
-        const existingTopic = await findPageInDatabase(
-          client,
-          conversationDb.id,
-          topicFilter,
-          assertNotCancelled,
-        );
-
-        if (existingTopic) {
-          const existingUpdatedAt =
-            conversationUpdatedProp && existingTopic.properties
-              ? existingTopic.properties[conversationUpdatedProp]?.date?.start ?? undefined
-              : undefined;
-          const relationIds: string[] = existingTopic.properties?.[relationProp]?.relation?.map(
-            (item: any) => item.id,
-          );
-          const relationMatchesCurrent = relationIds?.includes(assistantEntryId) ?? false;
-
-          if (conversationUpdatedProp && topicUpdatedAt && existingUpdatedAt === topicUpdatedAt && relationMatchesCurrent) {
-            emit(`  -> Skipping topic record (no changes): ${topicLabel}`);
-            continue;
+          };
+          if (sessionProp) {
+            properties[sessionProp] = {
+              rich_text: toRichText(session.sessionLabel),
+            };
+          }
+          if (conversationCreatedProp && topicCreatedAt) {
+            properties[conversationCreatedProp] = {
+              date: { start: topicCreatedAt },
+            };
+          }
+          if (conversationUpdatedProp && topicUpdatedAt) {
+            properties[conversationUpdatedProp] = {
+              date: { start: topicUpdatedAt },
+            };
           }
 
-          emit(`  -> Refreshing topic record: ${topicLabel}`);
-          await archivePage(client, existingTopic.id, assertNotCancelled);
+          const children = markdownToBlocks(markdown);
+          const defaultTopicFilter = {
+            and: [
+              {
+                property: conversationTitleProp,
+                title: { equals: topicLabel },
+              },
+              {
+                property: relationProp,
+                relation: { contains: assistantEntryId },
+              },
+            ],
+          };
+
+          const topicFilter =
+            previousAssistantId && previousAssistantId !== assistantEntryId
+              ? {
+                  or: [
+                    defaultTopicFilter,
+                    {
+                      and: [
+                        {
+                          property: conversationTitleProp,
+                          title: { equals: topicLabel },
+                        },
+                        {
+                          property: relationProp,
+                          relation: { contains: previousAssistantId },
+                        },
+                      ],
+                    },
+                  ],
+                }
+              : defaultTopicFilter;
+
+          const existingTopic = await findPageInDatabase(
+            client,
+            conversationDb.id,
+            topicFilter,
+            assertNotCancelled,
+          );
+
+          if (existingTopic) {
+            const existingUpdatedAt =
+              conversationUpdatedProp && existingTopic.properties
+                ? existingTopic.properties[conversationUpdatedProp]?.date?.start ?? undefined
+                : undefined;
+            const relationIds: string[] = existingTopic.properties?.[relationProp]?.relation?.map(
+              (item: any) => item.id,
+            );
+            const relationMatchesCurrent = relationIds?.includes(assistantEntryId) ?? false;
+
+            if (conversationUpdatedProp && topicUpdatedAt && existingUpdatedAt === topicUpdatedAt && relationMatchesCurrent) {
+              emit(`  -> Skipping topic record (no changes): ${topicLabel}`);
+              continue;
+            }
+
+            emit(`  -> Refreshing topic record: ${topicLabel}`);
+            await archivePage(client, existingTopic.id, assertNotCancelled);
+            assertNotCancelled();
+            await sleep(200);
+            assertNotCancelled();
+          }
+
+          emit(`  -> Creating topic record: ${topicLabel}`);
+          await createPageWithChildren(
+            client,
+            {
+              parent: { database_id: conversationDb.id },
+              icon: { type: 'emoji', emoji: TOPIC_EMOJI },
+              properties,
+              children,
+            },
+            assertNotCancelled,
+          );
           assertNotCancelled();
           await sleep(200);
           assertNotCancelled();
+        } catch (error) {
+          recordError(`助手 ${group.agentLabel} / 会话 ${session.sessionLabel} / 主题 ${topicLabel} 导出失败`, error);
         }
-
-        emit(`  -> Creating topic record: ${topicLabel}`);
-        await createPageWithChildren(
-          client,
-          {
-            parent: { database_id: conversationDb.id },
-            icon: { type: 'emoji', emoji: TOPIC_EMOJI },
-            properties,
-            children,
-          },
-          assertNotCancelled,
-        );
-        assertNotCancelled();
-        await sleep(200);
-        assertNotCancelled();
       }
     }
+  }
+
+  if (errors.length) {
+    const summary = [
+      `Notion 导出完成，但存在 ${errors.length} 个错误：`,
+      ...errors.map((item, index) => `${index + 1}. ${item}`),
+    ].join('\n');
+    throw new Error(summary);
   }
 };
 
