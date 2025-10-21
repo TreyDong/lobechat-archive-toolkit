@@ -36,7 +36,9 @@ export const AssistantTree = () => {
       <div className="space-y-5">
         {sortedGroups.map((group) => {
           const agentTitle = group.agent?.title?.trim() ?? '';
-          const agentExtra = group.agent as Record<string, unknown> | undefined;
+          const agentExtra = group.agent
+            ? (group.agent as unknown as Record<string, unknown>)
+            : undefined;
           const rawClientId = agentExtra?.clientId ?? agentExtra?.client_id ?? '';
           const clientIdValue =
             typeof rawClientId === 'string'

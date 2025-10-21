@@ -333,7 +333,8 @@ export const parseLobeChatJson = (
   const assignedTopicIds = new Set<string>();
   const defaultAgent = Object.values(agents).find((agent) => {
     if (!agent) return false;
-    const rawClientId = (agent as Record<string, unknown>).clientId ?? (agent as Record<string, unknown>).client_id ?? '';
+    const agentExtra = agent as unknown as Record<string, unknown>;
+    const rawClientId = agentExtra.clientId ?? agentExtra.client_id ?? '';
     const clientIdValue =
       typeof rawClientId === 'string'
         ? rawClientId.trim()
@@ -549,7 +550,7 @@ export const buildMarkdownExport = (parsed: ParsedData): MarkdownExport => {
   const usedAgentDirNames = new Set<string>();
 
   for (const group of parsed.groups) {
-    const agentExtra = group.agent as Record<string, unknown> | undefined;
+    const agentExtra = group.agent ? (group.agent as unknown as Record<string, unknown>) : undefined;
     const rawClientId = agentExtra?.clientId ?? agentExtra?.client_id ?? '';
     const clientIdValue =
       typeof rawClientId === 'string'
